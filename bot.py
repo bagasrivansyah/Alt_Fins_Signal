@@ -1,33 +1,52 @@
 import requests
 import time
 import os
+from datetime import datetime
 
 # --- KONFIGURASI ---
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Konfigurasi Trading
-LEVERAGE = 20          # Anda bisa mengubah ini (misal: 10, 20, 50)
+LEVERAGE = 20          
 LONG_THRESHOLD = 5.0   
 SHORT_THRESHOLD = -5.0 
 VOL_MIN_USDT = 5000000 
 
 BINANCE_URLS = ["https://api1.binance.com", "https://api2.binance.com", "https://data-api.binance.vision"]
 
+# DATABASE & STATISTIK
 active_positions = {} 
 sent_signals = {}
+daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
+last_report_date = datetime.now().date()
 
 def send_telegram(text):
     if not TOKEN or not CHAT_ID: return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(url, json={
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": False
-        }, timeout=10)
+        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": False}, timeout=10)
     except: pass
+
+def send_daily_report():
+    """Mengirim rangkuman hasil trading harian"""
+    global daily_stats
+    total = daily_stats['tp'] + daily_stats['sl']
+    winrate = (daily_stats['tp'] / total * 100) if total > 0 else 0
+    
+    report = (
+        f"📊 *DAILY TRADING REPORT*\n"
+        f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"✅ Take Profit: `{daily_stats['tp']}`\n"
+        f"❌ Stop Loss: `{daily_stats['sl']}`\n"
+        f"📈 Win Rate: `{winrate:.1f}%`\n"
+        f"💰 Total ROE: `{daily_stats['total_roe']:+.2f}%` (20x)\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🔥 *Bot is ready for tomorrow!*"
+    )
+    send_telegram(report)
+    # Reset stats untuk hari berikutnya
+    daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
 
 def get_rsi(symbol):
     for base in BINANCE_URLS:
@@ -43,7 +62,7 @@ def get_rsi(symbol):
     return None
 
 def track_prices(current_data):
-    global active_positions
+    global active_positions, daily_stats
     to_remove = []
 
     for symbol, pos in active_positions.items():
@@ -61,18 +80,19 @@ def track_prices(current_data):
             elif current_price >= pos['sl']: status = "❌ STOP LOSS HIT"
 
         if status:
-            # Hitung Profit murni dikali Leverage
             raw_pnl = ((current_price - pos['entry']) / pos['entry'])
             if pos['side'] == "SHORT": raw_pnl = -raw_pnl
             roe = raw_pnl * LEVERAGE * 100
             
-            emoji = "💰" if "PROFIT" in status else "💸"
+            # Update Statistik
+            if "TAKE PROFIT" in status: daily_stats['tp'] += 1
+            else: daily_stats['sl'] += 1
+            daily_stats['total_roe'] += roe
+            
             msg = (
-                f"{emoji} *{status}*\n"
+                f"{'💰' if 'PROFIT' in status else '💸'} *{status}*\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"Asset: *{symbol}*\n"
-                f"Leverage: `{LEVERAGE}x`\n"
-                f"ROE: `{roe:+.2f}%` 🚀\n"
+                f"Asset: *{symbol}* | ROE: `{roe:+.2f}%` 🚀\n"
                 f"━━━━━━━━━━━━━━━"
             )
             send_telegram(msg)
@@ -82,14 +102,20 @@ def track_prices(current_data):
         del active_positions[sym]
 
 def analyze():
-    print("Memindai market...")
+    global last_report_date
+    print("Memindai market & monitoring...")
+    
+    # Cek apakah sudah ganti hari untuk kirim Daily Report (Kirim setiap jam 00:00 server)
+    current_date = datetime.now().date()
+    if current_date > last_report_date:
+        send_daily_report()
+        last_report_date = current_date
+
     data = None
     for base in BINANCE_URLS:
         try:
-            res = requests.get(f"{base}/api/v3/ticker/24hr", timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                break
+            res = requests.get(f"{base}/api/v3/ticker/24hr", timeout=10); 
+            if res.status_code == 200: data = res.json(); break
         except: continue
     
     if not data: return
@@ -109,37 +135,26 @@ def analyze():
         if side:
             sig_id = f"{symbol}_{side}"
             if sig_id in sent_signals and (now - sent_signals[sig_id] < 14400): continue
-
             rsi_val = get_rsi(symbol)
-            if rsi_val is None: continue
-            if (side == "LONG" and rsi_val > 65) or (side == "SHORT" and rsi_val < 35): continue
+            if rsi_val is None or (side == "LONG" and rsi_val > 65) or (side == "SHORT" and rsi_val < 35): continue
             
             price = float(coin['lastPrice'])
-            # Target TP 3% (ROE 60% jika leverage 20x)
-            # Target SL 1.5% (ROE -30% jika leverage 20x)
             tp = price * (1.03 if side == "LONG" else 0.97)
             sl = price * (0.985 if side == "LONG" else 1.015)
             
-            active_positions[symbol] = {
-                "side": side, "entry": price, "tp": tp, "sl": sl
-            }
-
+            active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
             msg = (
                 f"{'🟢' if side == 'LONG' else '🔴'} *NEW SIGNAL: {side}*\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"💎 *Asset:* #{symbol}\n"
-                f"⚙️ *Leverage:* `Cross {LEVERAGE}x`\n"
+                f"💎 *Asset:* #{symbol} | `20x`\n"
                 f"💵 *Entry:* `{price:.4f}`\n"
+                f"🎯 *Target:* `{tp:.4f}`\n"
+                f"🛑 *SL:* `{sl:.4f}`\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 *Target (ROE 60%):* `{tp:.4f}`\n"
-                f"🛑 *Stop Loss:* `{sl:.4f}`\n"
-                f"📊 *RSI (1h):* `{rsi_val:.2f}`\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"📈 [View Chart](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
+                f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
             )
             send_telegram(msg)
             sent_signals[sig_id] = now
-            print(f"✅ Sinyal dikirim: {symbol}")
 
 if __name__ == "__main__":
     while True:
