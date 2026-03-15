@@ -7,86 +7,101 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Sinyal Threshold
-LONG_THRESHOLD = 4.0   # Naik > 4% dianggap potensi Long
-SHORT_THRESHOLD = -4.0 # Turun > 4% dianggap potensi Short
-VOL_MIN_USDT = 2000000 # Minimal volume 2jt USDT agar koin tidak terlalu beresiko
+LONG_THRESHOLD = 3.5   
+SHORT_THRESHOLD = -3.5 
+VOL_MIN_USDT = 2000000 
 
 sent_signals = {}
 
 def send_telegram(text):
-    if not TOKEN or not CHAT_ID:
-        print("❌ Token/Chat ID belum diset di Railway")
-        return
+    if not TOKEN or not CHAT_ID: return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"})
+        requests.post(url, json={
+            "chat_id": CHAT_ID, 
+            "text": text, 
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        })
     except: pass
 
-def get_market_data():
-    url = "https://api.binance.com/api/v3/ticker/24hr"
+def get_rsi(symbol):
+    """Menghitung RSI periode 14 menggunakan data kline 1 jam"""
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=100"
     try:
-        r = requests.get(url, timeout=10)
-        return r.json() if r.status_code == 200 else []
+        r = requests.get(url, timeout=10).json()
+        closes = [float(x[4]) for x in r]
+        
+        deltas = []
+        for i in range(len(closes)-1):
+            deltas.append(closes[i+1] - closes[i])
+            
+        up = [x if x > 0 else 0 for x in deltas]
+        down = [abs(x) if x < 0 else 0 for x in deltas]
+        
+        avg_gain = sum(up[-14:]) / 14
+        avg_loss = sum(down[-14:]) / 14
+        
+        if avg_loss == 0: return 100
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
     except:
-        return []
+        return None
 
 def analyze():
-    print("Menganalisis pergerakan Binance...")
-    data = get_market_data()
+    print("Menganalisis Binance + RSI...")
+    url = "https://api.binance.com/api/v3/ticker/24hr"
+    try:
+        data = requests.get(url).json()
+    except: return
+
     now = time.time()
     
     for coin in data:
         symbol = coin['symbol']
-        # Filter hanya pair USDT (Futures friendly)
         if not symbol.endswith("USDT"): continue
         
-        last_price = float(coin['lastPrice'])
         change = float(coin['priceChangePercent'])
         volume = float(coin['quoteVolume'])
 
-        # Filter volume agar tidak memantau koin mati
         if volume < VOL_MIN_USDT: continue
 
         side = None
-        if change >= LONG_THRESHOLD:
-            side = "LONG"
-        elif change <= SHORT_THRESHOLD:
-            side = "SHORT"
+        if change >= LONG_THRESHOLD: side = "LONG"
+        elif change <= SHORT_THRESHOLD: side = "SHORT"
 
         if side:
-            # Cegah spam koin yang sama selama 4 jam
             sig_id = f"{symbol}_{side}"
             if sig_id in sent_signals and (now - sent_signals[sig_id] < 14400):
                 continue
 
-            # Kalkulasi Target
-            if side == "LONG":
-                tp = last_price * 1.03
-                sl = last_price * 0.98
-                emoji = "🚀"
-            else:
-                tp = last_price * 0.97
-                sl = last_price * 1.02
-                emoji = "🔻"
+            # Ambil RSI
+            rsi_val = get_rsi(symbol)
+            if rsi_val is None: continue
+            
+            last_price = float(coin['lastPrice'])
+            tp = last_price * (1.03 if side == "LONG" else 0.97)
+            sl = last_price * (0.98 if side == "LONG" else 1.02)
+            
+            # Link TradingView
+            tv_url = f"https://www.tradingview.com/chart/?symbol=BINANCE:{symbol}"
 
             msg = (
-                f"{emoji} *BINANCE FUTURES SIGNAL*\n\n"
+                f"{'🚀' if side == 'LONG' else '🔻'} *BINANCE {side}*\n\n"
                 f"Pair: #{symbol}\n"
-                f"Side: *{side}*\n"
                 f"Price: `{last_price}`\n"
-                f"24h Change: `{change}%`\n\n"
+                f"24h Change: `{change}%`\n"
+                f"RSI (1h): `{rsi_val:.2f}`\n\n"
                 f"🎯 Target: `{tp:.4f}`\n"
-                f"🛑 Stop Loss: `{sl:.4f}`\n\n"
-                f"⚡ *Auto-detected by Binance Scanner*"
+                f"🛑 SL: `{sl:.4f}`\n\n"
+                f"📈 [Buka Chart TradingView]({tv_url})"
             )
             
             send_telegram(msg)
             sent_signals[sig_id] = now
-            print(f"✅ Berhasil kirim {side} {symbol}")
+            print(f"✅ Sinyal {symbol} (RSI: {rsi_val:.2f})")
 
 if __name__ == "__main__":
-    print("Bot Binance Long/Short Aktif...")
     while True:
         analyze()
-        # Scan setiap 5 menit (300 detik)
         time.sleep(300)
