@@ -5,95 +5,88 @@ import os
 # --- KONFIGURASI ---
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-API_KEY = os.getenv("ALTFINS_API_KEY", "")
 
-# URL API v2 sesuai temuan Anda
-URL = "https://altfins.com/api/v2/public/signals-feed/search-requests"
+# Sinyal Threshold
+LONG_THRESHOLD = 4.0   # Naik > 4% dianggap potensi Long
+SHORT_THRESHOLD = -4.0 # Turun > 4% dianggap potensi Short
+VOL_MIN_USDT = 2000000 # Minimal volume 2jt USDT agar koin tidak terlalu beresiko
 
-# Risk Management
-TP1_PCT = 0.02
-SL_PCT = 0.015
 sent_signals = {}
 
 def send_telegram(text):
-    if not TOKEN or not CHAT_ID: return
+    if not TOKEN or not CHAT_ID:
+        print("❌ Token/Chat ID belum diset di Railway")
+        return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
+        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"})
     except: pass
 
-def fetch_signals():
-    if not API_KEY:
-        print("❌ API_KEY belum diisi di Variables Railway!")
-        return
-
-    headers = {
-        "Authorization": f"Bearer {API_KEY.strip()}",
-        "Content-Type": "application/json"
-    }
-    
-    # Payload untuk mencari sinyal Unusual Volume & Resistance Breakout
-    # Sesuai standar API v2 altFINS
-    payload = {
-        "filter": {
-            "signalType": ["UNUSUAL_VOLUME", "RESISTANCE_BREAKOUT"],
-            "exchange": "Binance"
-        },
-        "limit": 5
-    }
-
-    print(f"Mengecek sinyal via API v2...")
+def get_market_data():
+    url = "https://api.binance.com/api/v3/ticker/24hr"
     try:
-        # Menggunakan POST sesuai kebutuhan endpoint search-requests
-        response = requests.post(URL, headers=headers, json=payload, timeout=20)
+        r = requests.get(url, timeout=10)
+        return r.json() if r.status_code == 200 else []
+    except:
+        return []
+
+def analyze():
+    print("Menganalisis pergerakan Binance...")
+    data = get_market_data()
+    now = time.time()
+    
+    for coin in data:
+        symbol = coin['symbol']
+        # Filter hanya pair USDT (Futures friendly)
+        if not symbol.endswith("USDT"): continue
         
-        if response.status_code == 200:
-            data = response.json()
-            # Biasanya data ada di dalam list atau key 'items'
-            signals = data if isinstance(data, list) else data.get('items', data.get('data', []))
+        last_price = float(coin['lastPrice'])
+        change = float(coin['priceChangePercent'])
+        volume = float(coin['quoteVolume'])
+
+        # Filter volume agar tidak memantau koin mati
+        if volume < VOL_MIN_USDT: continue
+
+        side = None
+        if change >= LONG_THRESHOLD:
+            side = "LONG"
+        elif change <= SHORT_THRESHOLD:
+            side = "SHORT"
+
+        if side:
+            # Cegah spam koin yang sama selama 4 jam
+            sig_id = f"{symbol}_{side}"
+            if sig_id in sent_signals and (now - sent_signals[sig_id] < 14400):
+                continue
+
+            # Kalkulasi Target
+            if side == "LONG":
+                tp = last_price * 1.03
+                sl = last_price * 0.98
+                emoji = "🚀"
+            else:
+                tp = last_price * 0.97
+                sl = last_price * 1.02
+                emoji = "🔻"
+
+            msg = (
+                f"{emoji} *BINANCE FUTURES SIGNAL*\n\n"
+                f"Pair: #{symbol}\n"
+                f"Side: *{side}*\n"
+                f"Price: `{last_price}`\n"
+                f"24h Change: `{change}%`\n\n"
+                f"🎯 Target: `{tp:.4f}`\n"
+                f"🛑 Stop Loss: `{sl:.4f}`\n\n"
+                f"⚡ *Auto-detected by Binance Scanner*"
+            )
             
-            if not signals:
-                print("Sinyal belum ditemukan saat ini.")
-                return
-
-            now = time.time()
-            for coin in signals:
-                symbol = coin.get("symbol")
-                price = float(coin.get("lastPrice") or coin.get("price") or 0)
-                signal_name = coin.get("signalType", "ALGO")
-
-                if not symbol or price == 0: continue
-                
-                sig_id = f"{symbol}_{signal_name}"
-                if sig_id in sent_signals and (now - sent_signals[sig_id] < 3600):
-                    continue
-
-                # Kalkulasi Futures Long
-                tp1 = price * (1 + TP1_PCT)
-                sl = price * (1 - SL_PCT)
-
-                msg = (
-                    f"🚀 *ALTFINS V2 SIGNAL*\n\n"
-                    f"Pair: #{symbol}\n"
-                    f"Type: `{signal_name}`\n"
-                    f"Entry: `{price:.4f}`\n\n"
-                    f"🎯 TP1: `{tp1:.4f}`\n"
-                    f"🛑 SL: `{sl:.4f}`\n"
-                )
-                
-                send_telegram(msg)
-                sent_signals[sig_id] = now
-                print(f"✅ Sinyal {symbol} terkirim!")
-
-        else:
-            print(f"❌ Error API v2 ({response.status_code})")
-            print(f"Detail: {response.text}")
-
-    except Exception as e:
-        print(f"⚠️ Error: {e}")
+            send_telegram(msg)
+            sent_signals[sig_id] = now
+            print(f"✅ Berhasil kirim {side} {symbol}")
 
 if __name__ == "__main__":
-    print("Bot altFINS v2 Aktif di Railway...")
+    print("Bot Binance Long/Short Aktif...")
     while True:
-        fetch_signals()
-        time.sleep(600) # Cek setiap 10 menit
+        analyze()
+        # Scan setiap 5 menit (300 detik)
+        time.sleep(300)
