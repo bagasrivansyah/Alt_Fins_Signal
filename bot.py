@@ -3,6 +3,7 @@ import time
 import os
 import threading
 from datetime import datetime
+from tradingview_ta import TA_Handler, Interval # Library tambahan
 
 # --- KONFIGURASI RAILWAY ---
 TOKEN = os.getenv("TOKEN")
@@ -60,17 +61,24 @@ def call_binance(endpoint):
         except: continue
     return None
 
-def get_rsi(symbol):
-    data = call_binance(f"/api/v3/klines?symbol={symbol}&interval=1h&limit=100")
-    if not data or not isinstance(data, list): return None
+def get_tv_analysis(symbol):
+    """FUNGSI BARU: Mengambil rangkuman indikator dari TradingView"""
     try:
-        closes = [float(x[4]) for x in data]
-        deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
-        up = [x if x > 0 else 0 for x in deltas]; down = [abs(x) if x < 0 else 0 for x in deltas]
-        avg_gain = sum(up[-14:]) / 14; avg_loss = sum(down[-14:]) / 14
-        if avg_loss == 0: return 100
-        return 100 - (100 / (1 + (avg_gain / avg_loss)))
-    except: return None
+        handler = TA_Handler(
+            symbol=symbol,
+            exchange="BINANCE",
+            screener="crypto",
+            interval=Interval.INTERVAL_1_HOUR,
+            timeout=10
+        )
+        analysis = handler.get_analysis()
+        return {
+            "summary": analysis.summary['RECOMMENDATION'],
+            "rsi": analysis.indicators['RSI'],
+            "price": analysis.indicators['close']
+        }
+    except:
+        return None
 
 def format_signal_message(side, symbol, price, tp, sl, rsi_val, mode="SIGNAL"):
     emoji_side = "🟢" if side == "LONG" else "🔴"
@@ -90,43 +98,46 @@ def format_signal_message(side, symbol, price, tp, sl, rsi_val, mode="SIGNAL"):
 def handle_commands():
     global last_update_id
     url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-    try:
-        response = requests.get(url, params={"offset": last_update_id + 1, "timeout": 5}, timeout=10).json()
-        if not response.get("result"): return
-        for update in response["result"]:
-            last_update_id = update["update_id"]
-            message = update.get("message", {})
-            text = message.get("text", "")
-            sender_id = str(message.get("from", {}).get("id"))
-            
-            if not text or not sender_id: continue
+    while True:
+        try:
+            response = requests.get(url, params={"offset": last_update_id + 1, "timeout": 5}, timeout=10).json()
+            if not response.get("result"): continue
+            for update in response["result"]:
+                last_update_id = update["update_id"]
+                message = update.get("message", {})
+                text = message.get("text", "")
+                sender_id = str(message.get("from", {}).get("id"))
+                
+                if not text or not sender_id: continue
 
-            # Whitelist Check
-            if sender_id not in WHITELIST_IDS:
+                if sender_id not in WHITELIST_IDS:
+                    if text == "/start":
+                        send_telegram(f"❌ *AKSES DITOLAK*", sender_id)
+                    continue 
+
                 if text == "/start":
-                    send_telegram(f"❌ *AKSES DITOLAK*\n\nID: `{sender_id}`\nHubungi Admin untuk akses Premium.", sender_id)
-                continue 
+                    send_telegram("👋 *Akses Premium Aktif!*", sender_id, get_main_menu())
 
-            if text == "/start":
-                send_telegram("👋 *Akses Premium Aktif!*", sender_id, get_main_menu())
+                elif text == "📊 Cek Status" or text == "/status":
+                    msg = "📋 *Posisi Aktif:*\n" + "\n".join([f"• {s}" for s in active_positions.keys()]) if active_positions else "📭 *Kosong.*"
+                    send_telegram(msg, sender_id, get_main_menu())
 
-            elif text == "📊 Cek Status" or text == "/status":
-                msg = "📋 *Posisi Aktif:*\n" + "\n".join([f"• {s}" for s in active_positions.keys()]) if active_positions else "📭 *Kosong.*"
-                send_telegram(msg, sender_id, get_main_menu())
-
-            elif "Analisa" in text or text.startswith("/analisa"):
-                coin = text.replace("🔍 Analisa ", "").replace("📈 Analisa ", "").replace("🚀 Analisa ", "").replace("/analisa ", "").upper()
-                sym = coin + ("USDT" if not coin.endswith("USDT") else "")
-                ticker = call_binance(f"/api/v3/ticker/price?symbol={sym}")
-                if not ticker:
-                    send_telegram(f"❌ Koin {sym} tidak ditemukan.", sender_id)
-                    continue
-                p = float(ticker['price']); rsi = get_rsi(sym)
-                side = "LONG" if rsi < 50 else "SHORT"
-                tp = p * (1.03 if side == "LONG" else 0.97); sl = p * (0.985 if side == "LONG" else 1.015)
-                msg = format_signal_message(side, sym, p, tp, sl, rsi, mode="ANALYZE")
-                send_telegram(msg, sender_id, get_main_menu())
-    except: pass
+                elif "Analisa" in text or text.startswith("/analisa"):
+                    coin = text.replace("🔍 Analisa ", "").replace("📈 Analisa ", "").replace("🚀 Analisa ", "").replace("/analisa ", "").upper().strip()
+                    sym = coin + ("USDT" if not coin.endswith("USDT") else "")
+                    
+                    # Menggunakan TradingView untuk analisa manual
+                    data = get_tv_analysis(sym)
+                    if not data:
+                        send_telegram(f"❌ Koin {sym} tidak ditemukan.", sender_id)
+                        continue
+                    
+                    p = data['price']; rsi = data['rsi']
+                    side = "LONG" if "BUY" in data['summary'] else "SHORT"
+                    tp = p * (1.03 if side == "LONG" else 0.97); sl = p * (0.985 if side == "LONG" else 1.015)
+                    msg = format_signal_message(side, sym, p, tp, sl, rsi, mode="ANALYZE")
+                    send_telegram(msg, sender_id, get_main_menu())
+        except: time.sleep(2)
 
 def track_prices(current_data):
     global active_positions, daily_stats, sent_signals
@@ -149,12 +160,7 @@ def track_prices(current_data):
             daily_stats['total_roe'] += roe
             
             icon = "💰" if "PROFIT" in status else "💸"
-            msg = (
-                f"{icon} *{status}*\n\n"
-                f"Asset: *{symbol}*\n"
-                f"Side: *{pos['side']}* | Leverage: `{LEVERAGE}x`\n"
-                f"ROE: `{roe:+.2f}%` 🚀"
-            )
+            msg = (f"{icon} *{status}*\n\nAsset: *{symbol}*\nROE: `{roe:+.2f}%` 🚀")
             send_telegram(msg)
             sent_signals[symbol] = time.time()
             to_remove.append(symbol)
@@ -166,18 +172,13 @@ def analyze():
     if datetime.now().date() > last_report_date:
         total = daily_stats['tp'] + daily_stats['sl']
         winrate = (daily_stats['tp'] / total * 100) if total > 0 else 0
-        report = (
-            f"📊 *DAILY REPORT*\n"
-            f"__________________________________\n\n"
-            f"✅ TP: `{daily_stats['tp']}` | ❌ SL: `{daily_stats['sl']}`\n"
-            f"📈 Win Rate: `{winrate:.1f}%`\n"
-            f"💰 Total ROE: `{daily_stats['total_roe']:+.2f}%`"
-        )
+        report = (f"📊 *DAILY REPORT*\nWin Rate: `{winrate:.1f}%`\nROE: `{daily_stats['total_roe']:+.2f}%`")
         send_telegram(report)
         daily_stats.update({"tp": 0, "sl": 0, "total_roe": 0.0})
         last_report_date = datetime.now().date()
 
-    data = call_binance("/api/v3/ticker/24hr")
+    # Get Binance Prices
+    data = call_binance("/fapi/v1/ticker/24hr") # Fixed endpoint for futures
     if not data: return
     track_prices(data)
     now = time.time()
@@ -187,21 +188,30 @@ def analyze():
         try:
             change = float(coin['priceChangePercent']); vol = float(coin['quoteVolume'])
             if vol < VOL_MIN_USDT: continue
-            side = "LONG" if change >= LONG_THRESHOLD else "SHORT" if change <= SHORT_THRESHOLD else None
-            if side:
+            
+            # Logic Awal: Threshold Harga
+            if change >= LONG_THRESHOLD or change <= SHORT_THRESHOLD:
                 if (symbol in sent_signals and now - sent_signals[symbol] < COOLDOWN_SECONDS): continue
-                rsi_val = get_rsi(symbol)
-                if rsi_val is None or (side == "LONG" and rsi_val > 65) or (side == "SHORT" and rsi_val < 35): continue
-                price = float(coin['lastPrice'])
-                tp = price * (1.03 if side == "LONG" else 0.97)
-                sl = price * (0.985 if side == "LONG" else 1.015)
-                active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
-                send_telegram(format_signal_message(side, symbol, price, tp, sl, rsi_val))
+                
+                # Validasi dengan TradingView
+                tv = get_tv_analysis(symbol)
+                if not tv: continue
+                
+                side = None
+                if change >= LONG_THRESHOLD and "BUY" in tv['summary']: side = "LONG"
+                elif change <= SHORT_THRESHOLD and "SELL" in tv['summary']: side = "SHORT"
+                
+                if side:
+                    price = tv['price']; rsi_val = tv['rsi']
+                    tp = price * (1.03 if side == "LONG" else 0.97)
+                    sl = price * (0.985 if side == "LONG" else 1.015)
+                    active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
+                    send_telegram(format_signal_message(side, symbol, price, tp, sl, rsi_val))
         except: continue
 
 if __name__ == "__main__":
-    print("Bot Final Premium v4 Aktif...")
-    threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
+    print("Bot Premium v4 + TradingView Aktif...")
+    threading.Thread(target=handle_commands, daemon=True).start()
     while True:
         analyze()
         time.sleep(60)
