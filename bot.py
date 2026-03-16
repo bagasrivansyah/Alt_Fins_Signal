@@ -11,7 +11,7 @@ WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 
 # Konfigurasi Trading Pro
 LEVERAGE = 20          
-VOL_MIN_USDT = 10000000 
+VOL_MIN_USDT = 3000000 
 COOLDOWN_SECONDS = 14400 
 # Rasio TP 1, 2, dan 3 berdasarkan Risk
 TP1_RR = 1.0  # RR 1:1
