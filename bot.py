@@ -37,7 +37,7 @@ def format_price(price):
     else:
         return f"{price:.8f}"
 
-# --- VISUAL CHART TEKS ---
+# --- VISUAL CHART TEKS PREMIUM ---
 def generate_visual_chart(side, price, tp, sl):
     p_f = format_price(price)
     tp_f = format_price(tp)
@@ -46,23 +46,21 @@ def generate_visual_chart(side, price, tp, sl):
     if side == "LONG":
         chart = (
             f"```\n"
-            f"📈 TARGET VISUAL (LONG)\n"
-            f"TP  ─── {tp_f}\n"
-            f"         ▲\n"
-            f"ENT ─── {p_f}\n"
-            f"         ▲\n"
-            f"SL  ─── {sl_f}\n"
+            f"🎯 TARGET (TP) : {tp_f}\n"
+            f"▲───────────────▲\n"
+            f"💎 ENTRY PRICE  : {p_f}\n"
+            f"▲───────────────▲\n"
+            f"🛑 STOP LOSS    : {sl_f}\n"
             f"```"
         )
     else:
         chart = (
             f"```\n"
-            f"📉 TARGET VISUAL (SHORT)\n"
-            f"SL  ─── {sl_f}\n"
-            f"         ▼\n"
-            f"ENT ─── {p_f}\n"
-            f"         ▼\n"
-            f"TP  ─── {tp_f}\n"
+            f"🛑 STOP LOSS    : {sl_f}\n"
+            f"▼───────────────▼\n"
+            f"💎 ENTRY PRICE  : {p_f}\n"
+            f"▼───────────────▼\n"
+            f"🎯 TARGET (TP) : {tp_f}\n"
             f"```"
         )
     return chart
@@ -86,7 +84,7 @@ def send_telegram(text, target_id=None, reply_markup=None):
 def get_main_menu():
     return {
         "keyboard": [
-            [{"text": "📊 Cek Status"}, {"text": "🔍 Analisa BTC"}],
+            [{"text": "📊 Status Posisi"}, {"text": "🔍 Analisa BTC"}],
             [{"text": "📈 Analisa ETH"}, {"text": "🚀 Analisa SOL"}]
         ],
         "resize_keyboard": True, "one_time_keyboard": False
@@ -114,21 +112,22 @@ def get_rsi(symbol):
     except: return None
 
 def format_signal_message(side, symbol, price, tp, sl, rsi_val, mode="SIGNAL"):
-    emoji_side = "🟢" if side == "LONG" else "🔴"
-    visual_chart = generate_visual_chart(side, price, tp, sl)
+    emoji = "🟢" if side == "LONG" else "🔴"
+    if mode == "ANALYZE": emoji = "⚡"
     
-    # Estimasi ROI saat TP (3% pergerakan x Leverage)
+    visual_chart = generate_visual_chart(side, price, tp, sl)
     est_roi = 3.0 * LEVERAGE
     
     msg = (
-        f"{emoji_side} *NEW {mode}: {side}*\n"
-        f"__________________________________\n\n"
-        f"💎 *Asset:* #{symbol} | Cross `{LEVERAGE}x`\n"
-        f"💵 *Entry:* `{format_price(price)}` | RSI: `{rsi_val:.2f}`\n\n"
+        f"{emoji} *{mode}: {side} DETECTED*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🪙 *Asset:* #{symbol}\n"
+        f"⚙️ *Margin:* `Cross {LEVERAGE}x`\n"
+        f"📊 *RSI (1h):* `{rsi_val:.2f}`\n\n"
         f"{visual_chart}\n"
-        f"💰 *Estimasi ROI:* `+{est_roi:.2f}%` 🚀\n"
-        f"__________________________________\n\n"
-        f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
+        f"💰 *Est. Profit:* `+{est_roi:.2f}% ROI`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📈 [View Chart on TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
     )
     return msg
 
@@ -152,11 +151,16 @@ def handle_commands():
                 continue 
 
             if text == "/start":
-                send_telegram("👋 *Akses Premium Aktif!*", sender_id, get_main_menu())
+                send_telegram("💎 *Sistem Premium Aktif!*", sender_id, get_main_menu())
 
-            elif "Cek Status" in text:
-                msg = "📋 *Posisi Aktif:*\n" + "\n".join([f"• {s} ({active_positions[s]['side']})" for s in active_positions.keys()]) if active_positions else "📭 *Kosong.*"
-                send_telegram(msg, sender_id, get_main_menu())
+            elif "Status" in text:
+                if active_positions:
+                    m = "📋 *DAFTAR POSISI AKTIF*\n━━━━━━━━━━━━━━━━━━━━\n"
+                    for s, p in active_positions.items():
+                        m += f"• *{s}* | {p['side']} | `{format_price(p['entry'])}` \n"
+                else:
+                    m = "📭 *Tidak ada posisi aktif saat ini.*"
+                send_telegram(m, sender_id, get_main_menu())
 
             elif "Analisa" in text:
                 coin = text.replace("🔍 Analisa ", "").replace("📈 Analisa ", "").replace("🚀 Analisa ", "").strip().upper()
@@ -181,29 +185,28 @@ def track_prices(current_data):
         curr = float(coin['lastPrice'])
         status = None
         if pos['side'] == "LONG":
-            if curr >= pos['tp']: status = "✅ TAKE PROFIT HIT"
-            elif curr <= pos['sl']: status = "❌ STOP LOSS HIT"
+            if curr >= pos['tp']: status = "TAKE PROFIT"
+            elif curr <= pos['sl']: status = "STOP LOSS"
         else:
-            if curr <= pos['tp']: status = "✅ TAKE PROFIT HIT"
-            elif curr >= pos['sl']: status = "❌ STOP LOSS HIT"
+            if curr <= pos['tp']: status = "TAKE PROFIT"
+            elif curr >= pos['sl']: status = "STOP LOSS"
             
         if status:
-            # Kalkulasi ROI Riil berdasarkan harga saat hit
             raw_pnl = ((curr - pos['entry']) / pos['entry']) * (1 if pos['side'] == "LONG" else -1)
             roe = raw_pnl * LEVERAGE * 100
             
             daily_stats['tp' if "PROFIT" in status else 'sl'] += 1
             daily_stats['total_roe'] += roe
             
-            icon = "💰" if "PROFIT" in status else "💸"
+            icon = "🔥" if "PROFIT" in status else "💀"
             msg = (
-                f"{icon} *{status}*\n"
-                f"__________________________________\n\n"
-                f"🪙 Asset: *#{symbol}*\n"
-                f"↕️ Side: *{pos['side']}* | Leverage: `{LEVERAGE}x`\n"
-                f"📊 *ROI: {roe:+.2f}%*\n"
-                f"💵 Exit Price: `{format_price(curr)}`\n"
-                f"__________________________________"
+                f"{icon} *POSISI CLOSED: {status}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🪙 *Asset:* #{symbol}\n"
+                f"↕️ *Side:* {pos['side']} | `{LEVERAGE}x`\n"
+                f"📈 *ROI:* `{roe:+.2f}%` 🚀\n"
+                f"💵 *Exit Price:* `{format_price(curr)}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
             )
             send_telegram(msg)
             sent_signals[symbol] = time.time()
@@ -218,10 +221,13 @@ def analyze():
         total = daily_stats['tp'] + daily_stats['sl']
         winrate = (daily_stats['tp'] / total * 100) if total > 0 else 0
         report = (
-            f"📊 *DAILY REPORT*\n"
-            f"__________________________________\n\n"
-            f"✅ TP: `{daily_stats['tp']}` | ❌ SL: `{daily_stats['sl']}`\n"
-            f"📈 Win Rate: `{winrate:.1f}%` | Total ROE: `{daily_stats['total_roe']:+.2f}%`"
+            f"🏆 *LAPORAN HARGA HARIAN*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"✅ TP Hit: `{daily_stats['tp']}`\n"
+            f"❌ SL Hit: `{daily_stats['sl']}`\n"
+            f"📈 Win Rate: `{winrate:.1f}%`\n"
+            f"💰 Total ROE: `{daily_stats['total_roe']:+.2f}%` \n\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
         )
         send_telegram(report)
         daily_stats.update({"tp": 0, "sl": 0, "total_roe": 0.0})
@@ -254,8 +260,9 @@ def analyze():
         except: continue
 
 if __name__ == "__main__":
-    print("Bot Premium v4.3 Active (RAM Edition)...")
+    print("Bot Crypto Premium v4.4 Active...")
     threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
     while True:
         analyze()
         time.sleep(60)
+
