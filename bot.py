@@ -12,6 +12,7 @@ LEVERAGE = 20          # Pengali keuntungan
 LONG_THRESHOLD = 5.0   # Sinyal jika naik > 5%
 SHORT_THRESHOLD = -5.0 # Sinyal jika turun > 5%
 VOL_MIN_USDT = 5000000 # Minimal Volume 5 Juta USDT
+COOLDOWN_SECONDS = 28800 # 8 Jam (8 * 3600)
 
 # API Alternatif untuk Bypass Blokir Railway
 BINANCE_URLS = [
@@ -84,8 +85,9 @@ def send_daily_report():
     daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
 
 def track_prices(current_data):
-    global active_positions, daily_stats
+    global active_positions, daily_stats, sent_signals
     to_remove = []
+    now = time.time()
 
     for symbol, pos in active_positions.items():
         coin_data = next((c for c in current_data if c['symbol'] == symbol), None)
@@ -119,13 +121,18 @@ def track_prices(current_data):
                 f"━━━━━━━━━━━━━━━"
             )
             send_telegram(msg)
+
+            # LOCK KOIN AGAR TIDAK MUNCUL LAGI (8 JAM)
+            sent_signals[symbol] = now 
+            sent_signals[f"{symbol}_{pos['side']}"] = now
+            
             to_remove.append(symbol)
 
     for sym in to_remove:
         if sym in active_positions: del active_positions[sym]
 
 def analyze():
-    global last_report_date
+    global last_report_date, sent_signals
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Memindai market & monitoring...")
     
     current_date = datetime.now().date()
@@ -152,14 +159,19 @@ def analyze():
 
             if side:
                 sig_id = f"{symbol}_{side}"
-                if sig_id in sent_signals and (now - sent_signals[sig_id] < 14400): continue
+                
+                # CEK COOLDOWN: Cek koin secara umum ATAU sinyal spesifik
+                is_cooldown_sym = symbol in sent_signals and (now - sent_signals[symbol] < COOLDOWN_SECONDS)
+                is_cooldown_sig = sig_id in sent_signals and (now - sent_signals[sig_id] < COOLDOWN_SECONDS)
+                
+                if is_cooldown_sym or is_cooldown_sig:
+                    continue
 
                 rsi_val = get_rsi(symbol)
                 if rsi_val is None: continue
                 if (side == "LONG" and rsi_val > 65) or (side == "SHORT" and rsi_val < 35): continue
                 
                 price = float(coin['lastPrice'])
-                # TP 3%, SL 1.5%
                 tp = price * (1.03 if side == "LONG" else 0.97)
                 sl = price * (0.985 if side == "LONG" else 1.015)
                 roi_target = 3.0 * LEVERAGE
