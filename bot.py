@@ -13,9 +13,9 @@ WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 
 # Konfigurasi Trading
 LEVERAGE = 20          
-LONG_THRESHOLD = 5.0   
-SHORT_THRESHOLD = -5.0 
-VOL_MIN_USDT = 5000000 
+LONG_THRESHOLD = 1.0   
+SHORT_THRESHOLD = -1.0 
+VOL_MIN_USDT = 1000000 
 COOLDOWN_SECONDS = 28800 
 
 BINANCE_URLS = ["https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com", "https://data-api.binance.vision"]
