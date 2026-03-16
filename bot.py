@@ -13,18 +13,28 @@ WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 LEVERAGE = 20          
 LONG_THRESHOLD = 5.0   
 SHORT_THRESHOLD = -5.0 
-VOL_MIN_USDT = 5000000 
-COOLDOWN_SECONDS = 28800 
+VOL_MIN_USDT = 1000000 
+COOLDOWN_SECONDS = 3600 
 
-# Endpoint Resmi Binance
-FUTURES_URL = "https://fapi.binance.com"
-SPOT_URL = "https://api.binance.com"
+# BYPASS URLS (Untuk menghindari blokir IP Railway)
+BINANCE_FUTURES_BYPASS = ["https://fapi.binance.com", "https://api.binance.com/fapi", "https://fapi1.binance.com", "https://fapi2.binance.com"]
+BINANCE_SPOT_BYPASS = ["https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com", "https://data-api.binance.vision"]
 
 active_positions = {} 
 sent_signals = {}
-daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
-last_report_date = datetime.now().date()
 last_update_id = 0
+
+def call_binance_bypass(endpoints, path):
+    """Fungsi untuk mencoba berbagai API bypass jika satu gagal"""
+    for base in endpoints:
+        try:
+            url = f"{base}{path}"
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                return res.json()
+        except:
+            continue
+    return None
 
 def send_telegram(text, target_id=None, reply_markup=None):
     if not TOKEN: return
@@ -42,33 +52,45 @@ def get_main_menu():
         "resize_keyboard": True
     }
 
-def get_binance_data(coin_name):
-    """Mencari koin di Futures, format 1000x, atau Spot"""
+def format_premium_message(side, symbol, price, tp, sl, rsi_val, mode="SIGNAL"):
+    emoji_side = "🟢" if side == "LONG" else "🔴"
+    msg = (
+        f"{emoji_side} *NEW {mode}: {side}*\n"
+        f"__________________________________\n\n"
+        f"💎 *Asset:* #{symbol} | Cross `{LEVERAGE}x`\n"
+        f"💵 *Entry:* `{price:.6f}`\n\n"
+        f"🎯 *Target (ROE 60%):* `{tp:.6f}`\n"
+        f"🛑 *Stop Loss:* `{sl:.6f}`\n"
+        f"📊 *RSI (1h):* `{rsi_val:.2f}`\n"
+        f"__________________________________\n\n"
+        f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
+    )
+    return msg
+
+def get_binance_data_bypass(coin_name):
     coin = coin_name.upper().strip().replace("USDT", "")
     search_list = [f"{coin}USDT", f"1000{coin}USDT"]
     
-    # 1. Coba cari di Futures
+    # 1. Cek Futures via Bypass
     for s in search_list:
-        try:
-            res = requests.get(f"{FUTURES_URL}/fapi/v1/ticker/price?symbol={s}", timeout=5).json()
-            if 'price' in res:
-                return s, float(res['price']), "FUTURES"
-        except: continue
+        data = call_binance_bypass(BINANCE_FUTURES_BYPASS, f"/fapi/v1/ticker/price?symbol={s}")
+        if data and 'price' in data:
+            return s, float(data['price']), "FUTURES"
 
-    # 2. Coba cari di Spot
-    try:
-        res = requests.get(f"{SPOT_URL}/api/v3/ticker/price?symbol={coin}USDT", timeout=5).json()
-        if 'price' in res:
-            return f"{coin}USDT", float(res['price']), "SPOT"
-    except: pass
+    # 2. Cek Spot via Bypass
+    data = call_binance_bypass(BINANCE_SPOT_BYPASS, f"/api/v3/ticker/price?symbol={coin}USDT")
+    if data and 'price' in data:
+        return f"{coin}USDT", float(data['price']), "SPOT"
     
     return None, None, None
 
-def get_rsi(symbol, market_type):
-    base = FUTURES_URL if market_type == "FUTURES" else SPOT_URL
-    endpoint = "/fapi/v1/klines" if market_type == "FUTURES" else "/api/v3/klines"
+def get_rsi_bypass(symbol, market_type="FUTURES"):
+    endpoints = BINANCE_FUTURES_BYPASS if market_type == "FUTURES" else BINANCE_SPOT_BYPASS
+    path = f"/fapi/v1/klines?symbol={symbol}&interval=1h&limit=50" if market_type == "FUTURES" else f"/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
+    
+    data = call_binance_bypass(endpoints, path)
+    if not data: return 50
     try:
-        data = requests.get(f"{base}{endpoint}?symbol={symbol}&interval=1h&limit=100", timeout=5).json()
         closes = [float(x[4]) for x in data]
         deltas = [closes[i+1]-closes[i] for i in range(len(closes)-1)]
         up = [x if x > 0 else 0 for x in deltas]; down = [abs(x) if x < 0 else 0 for x in deltas]
@@ -87,63 +109,58 @@ def handle_commands():
             msg = update.get("message", {})
             text = msg.get("text", "")
             sender_id = str(msg.get("from", {}).get("id"))
-
-            if sender_id not in WHITELIST_IDS:
-                if text == "/start": send_telegram(f"❌ Akses Ditolak\nID: `{sender_id}`", sender_id)
-                continue
+            if sender_id not in WHITELIST_IDS: continue
 
             if text == "/start":
-                send_telegram("👋 *Bot Analisa Premium Aktif!*", sender_id, get_main_menu())
-            
+                send_telegram("👋 *Bot Premium Aktif!*", sender_id, get_main_menu())
             elif "Analisa" in text or text.startswith("/analisa"):
                 coin_raw = text.replace("🔍 Analisa ", "").replace("📈 Analisa ", "").replace("🚀 Analisa ", "").replace("/analisa ", "").strip()
-                sym, price, market = get_binance_data(coin_raw)
-                
-                if not sym:
+                sym, price, market = get_binance_data_bypass(coin_raw)
+                if sym:
+                    rsi_v = get_rsi_bypass(sym, market)
+                    side = "LONG" if rsi_v < 50 else "SHORT"
+                    tp = price * (1.03 if side == "LONG" else 0.97)
+                    sl = price * (0.985 if side == "LONG" else 1.015)
+                    send_telegram(format_premium_message(side, sym, price, tp, sl, rsi_v, "ANALYZE"), sender_id)
+                else:
                     send_telegram(f"❌ Koin `{coin_raw}` tidak ditemukan.", sender_id)
+    except: pass
+
+def scan_market_bypass():
+    global sent_signals
+    # Gunakan bypass untuk mengambil data 24 jam
+    data = call_binance_bypass(BINANCE_FUTURES_BYPASS, "/fapi/v1/ticker/24hr")
+    if not data: return
+    
+    now = time.time()
+    for coin in data:
+        try:
+            symbol = coin['symbol']
+            if not symbol.endswith("USDT"): continue
+            change = float(coin['priceChangePercent'])
+            vol = float(coin['quoteVolume'])
+            
+            if vol > VOL_MIN_USDT and (change >= LONG_THRESHOLD or change <= SHORT_THRESHOLD):
+                if symbol in sent_signals and (now - sent_signals[symbol] < COOLDOWN_SECONDS):
                     continue
                 
-                rsi_val = get_rsi(sym, market)
-                side = "LONG" if rsi_val < 50 else "SHORT"
-                tp = price * (1.03 if side == "LONG" else 0.97)
-                sl = price * (0.985 if side == "LONG" else 1.015)
-                
-                m_info = f"Cross {LEVERAGE}x" if market == "FUTURES" else "SPOT Market"
-                resp = (
-                    f"{'🟢' if side == 'LONG' else '🔴'} *NEW ANALYZE: {side}*\n"
-                    f"__________________________________\n\n"
-                    f"💎 *Asset:* #{sym} | `{m_info}`\n"
-                    f"💵 *Entry:* `{price:.6f}`\n\n"
-                    f"🎯 *Target (ROE 60%):* `{tp:.6f}`\n"
-                    f"🛑 *Stop Loss:* `{sl:.6f}`\n"
-                    f"📊 *RSI (1h):* `{rsi_val:.2f}`\n"
-                    f"__________________________________\n\n"
-                    f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{sym}/)"
-                )
-                send_telegram(resp, sender_id, get_main_menu())
-    except: pass
-
-def analyze():
-    # Scanner otomatis tetap di Futures
-    try:
-        data = requests.get(f"{FUTURES_URL}/fapi/v1/ticker/24hr").json()
-        for coin in data:
-            symbol = coin['symbol']
-            if not symbol.endswith("USDT") or symbol in active_positions: continue
-            change = float(coin['priceChangePercent'])
-            if abs(change) >= LONG_THRESHOLD:
                 price = float(coin['lastPrice'])
-                rsi_val = get_rsi(symbol, "FUTURES")
-                side = "LONG" if change >= LONG_THRESHOLD and rsi_val < 65 else "SHORT" if change <= SHORT_THRESHOLD and rsi_val > 35 else None
+                rsi_v = get_rsi_bypass(symbol, "FUTURES")
+                
+                side = None
+                if change >= LONG_THRESHOLD and rsi_v < 70: side = "LONG"
+                elif change <= SHORT_THRESHOLD and rsi_v > 30: side = "SHORT"
+                
                 if side:
-                    tp, sl = price * (1.03 if side == "LONG" else 0.97), price * (0.985 if side == "LONG" else 1.015)
-                    active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
-                    send_telegram(f"🟢 *AUTO SIGNAL: {side}*\nAsset: #{symbol}\nEntry: `{price}`")
-    except: pass
+                    tp = price * (1.03 if side == "LONG" else 0.97)
+                    sl = price * (0.985 if side == "LONG" else 1.015)
+                    send_telegram(format_premium_message(side, symbol, price, tp, sl, rsi_v, "SIGNAL"))
+                    sent_signals[symbol] = now
+        except: continue
 
 if __name__ == "__main__":
-    print("Bot Premium v5 Running...")
+    print("Bot Premium Bypass v7 Aktif...")
     threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
     while True:
-        analyze()
-        time.sleep(60)
+        scan_market_bypass()
+        time.sleep(30)
