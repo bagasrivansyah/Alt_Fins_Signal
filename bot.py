@@ -25,19 +25,19 @@ daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
 last_report_date = datetime.now().date()
 last_update_id = 0
 
-# --- FUNGSI BARU: FORMAT HARGA DINAMIS ---
+# --- FORMAT HARGA DINAMIS ---
 def format_price(price):
     if price == 0: return "0"
     if price >= 1000:
-        return f"{price:,.2f}" # Contoh: 65,123.50
+        return f"{price:,.2f}"
     elif price >= 1:
-        return f"{price:.4f}"  # Contoh: 1.2345
+        return f"{price:.4f}"
     elif price >= 0.01:
-        return f"{price:.6f}"  # Contoh: 0.012345
+        return f"{price:.6f}"
     else:
-        return f"{price:.8f}"  # Contoh: 0.00001234 (Untuk koin SHIB/Meme)
+        return f"{price:.8f}"
 
-# --- FUNGSI BARU: VISUAL CHART TEKS ---
+# --- VISUAL CHART TEKS ---
 def generate_visual_chart(side, price, tp, sl):
     p_f = format_price(price)
     tp_f = format_price(tp)
@@ -117,12 +117,16 @@ def format_signal_message(side, symbol, price, tp, sl, rsi_val, mode="SIGNAL"):
     emoji_side = "🟢" if side == "LONG" else "🔴"
     visual_chart = generate_visual_chart(side, price, tp, sl)
     
+    # Estimasi ROI saat TP (3% pergerakan x Leverage)
+    est_roi = 3.0 * LEVERAGE
+    
     msg = (
         f"{emoji_side} *NEW {mode}: {side}*\n"
         f"__________________________________\n\n"
         f"💎 *Asset:* #{symbol} | Cross `{LEVERAGE}x`\n"
         f"💵 *Entry:* `{format_price(price)}` | RSI: `{rsi_val:.2f}`\n\n"
         f"{visual_chart}\n"
+        f"💰 *Estimasi ROI:* `+{est_roi:.2f}%` 🚀\n"
         f"__________________________________\n\n"
         f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
     )
@@ -184,16 +188,22 @@ def track_prices(current_data):
             elif curr >= pos['sl']: status = "❌ STOP LOSS HIT"
             
         if status:
+            # Kalkulasi ROI Riil berdasarkan harga saat hit
             raw_pnl = ((curr - pos['entry']) / pos['entry']) * (1 if pos['side'] == "LONG" else -1)
             roe = raw_pnl * LEVERAGE * 100
+            
             daily_stats['tp' if "PROFIT" in status else 'sl'] += 1
             daily_stats['total_roe'] += roe
             
             icon = "💰" if "PROFIT" in status else "💸"
             msg = (
-                f"{icon} *{status}*\n\n"
-                f"Asset: *{symbol}*\n"
-                f"Side: *{pos['side']}* | ROE: `{roe:+.2f}%` 🚀"
+                f"{icon} *{status}*\n"
+                f"__________________________________\n\n"
+                f"🪙 Asset: *#{symbol}*\n"
+                f"↕️ Side: *{pos['side']}* | Leverage: `{LEVERAGE}x`\n"
+                f"📊 *ROI: {roe:+.2f}%*\n"
+                f"💵 Exit Price: `{format_price(curr)}`\n"
+                f"__________________________________"
             )
             send_telegram(msg)
             sent_signals[symbol] = time.time()
@@ -211,7 +221,7 @@ def analyze():
             f"📊 *DAILY REPORT*\n"
             f"__________________________________\n\n"
             f"✅ TP: `{daily_stats['tp']}` | ❌ SL: `{daily_stats['sl']}`\n"
-            f"📈 Win Rate: `{winrate:.1f}%` | ROE: `{daily_stats['total_roe']:+.2f}%`"
+            f"📈 Win Rate: `{winrate:.1f}%` | Total ROE: `{daily_stats['total_roe']:+.2f}%`"
         )
         send_telegram(report)
         daily_stats.update({"tp": 0, "sl": 0, "total_roe": 0.0})
@@ -244,7 +254,7 @@ def analyze():
         except: continue
 
 if __name__ == "__main__":
-    print("Bot Premium v4.2 Active (RAM Edition)...")
+    print("Bot Premium v4.3 Active (RAM Edition)...")
     threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
     while True:
         analyze()
