@@ -130,12 +130,15 @@ def call_binance(endpoint):
 def format_signal_message(side, symbol, price, tp1, tp2, tp3, sl, reason, mode="SIGNAL"):
     emoji = "🔵" if side == "LONG" else "🟠"
     chart = generate_visual_chart(side, price, tp1, tp2, tp3, sl, reason)
+    # FITUR ROI (WAJIB ADA)
+    est_roi = (abs(tp3-price)/price) * LEVERAGE * 100
     msg = (
         f"{emoji} *ICT {mode}: {side}*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🪙 *Asset:* #{symbol} | `Cross {LEVERAGE}x`\n"
         f"🛡️ *SMC Trailing Active*\n\n"
         f"{chart}\n\n"
+        f"💰 *Est. Profit:* `+{est_roi:.2f}% ROI` (TP3)\n"
         f"⚠️ *Trailing:* TP1 -> BE | TP2 -> Lock TP1\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📈 [View on TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
