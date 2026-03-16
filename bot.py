@@ -208,6 +208,9 @@ def analyze():
                     active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
                     send_telegram(format_signal_message(side, symbol, price, tp, sl, rsi_val))
         except: continue
+                # Tambahkan ini di bagian paling bawah fungsi analyze()
+    # Pastikan lurus/sejajar secara vertikal dengan baris 'data = call_binance'
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Memindai {len(data)} koin... Status: Standby mencari sinyal.")
 
 if __name__ == "__main__":
     print("Bot Premium v4 + TradingView Aktif...")
