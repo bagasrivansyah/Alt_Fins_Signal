@@ -62,7 +62,7 @@ def call_binance(endpoint):
     return None
 
 def get_tv_analysis(symbol):
-    """FUNGSI BARU: Mengambil rangkuman indikator dari TradingView"""
+    """Mengambil rangkuman indikator dari TradingView"""
     try:
         handler = TA_Handler(
             symbol=symbol,
@@ -126,7 +126,6 @@ def handle_commands():
                     coin = text.replace("🔍 Analisa ", "").replace("📈 Analisa ", "").replace("🚀 Analisa ", "").replace("/analisa ", "").upper().strip()
                     sym = coin + ("USDT" if not coin.endswith("USDT") else "")
                     
-                    # Menggunakan TradingView untuk analisa manual
                     data = get_tv_analysis(sym)
                     if not data:
                         send_telegram(f"❌ Koin {sym} tidak ditemukan.", sender_id)
@@ -178,10 +177,11 @@ def analyze():
         last_report_date = datetime.now().date()
 
     # Get Binance Prices
-    data = call_binance("/fapi/v1/ticker/24hr") # Fixed endpoint for futures
+    data = call_binance("/fapi/v1/ticker/24hr") 
     if not data: return
     track_prices(data)
     now = time.time()
+    
     for coin in data:
         symbol = coin['symbol']
         if not symbol.endswith("USDT") or symbol in active_positions: continue
@@ -189,11 +189,9 @@ def analyze():
             change = float(coin['priceChangePercent']); vol = float(coin['quoteVolume'])
             if vol < VOL_MIN_USDT: continue
             
-            # Logic Awal: Threshold Harga
             if change >= LONG_THRESHOLD or change <= SHORT_THRESHOLD:
                 if (symbol in sent_signals and now - sent_signals[symbol] < COOLDOWN_SECONDS): continue
                 
-                # Validasi dengan TradingView
                 tv = get_tv_analysis(symbol)
                 if not tv: continue
                 
@@ -208,8 +206,8 @@ def analyze():
                     active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
                     send_telegram(format_signal_message(side, symbol, price, tp, sl, rsi_val))
         except: continue
-                # Tambahkan ini di bagian paling bawah fungsi analyze()
-    # Pastikan lurus/sejajar secara vertikal dengan baris 'data = call_binance'
+
+    # Log Pengecekan (Diletakkan di luar loop 'for' agar rapi)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Memindai {len(data)} koin... Status: Standby mencari sinyal.")
 
 if __name__ == "__main__":
