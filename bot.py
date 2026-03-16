@@ -1,52 +1,59 @@
 import requests
 import time
 import os
+import threading
 from datetime import datetime
 
-# --- KONFIGURASI ---
+# --- KONFIGURASI RAILWAY ---
 TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID = os.getenv("CHAT_ID")  # Alamat sinyal otomatis (Channel/Pribadi)
+
+# Format di Railway: 123456,789012 (Gunakan koma untuk banyak ID)
+# Sertakan ID Anda sendiri agar Anda bisa kontrol!
+WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 
 # Konfigurasi Trading
-LEVERAGE = 20          # Pengali keuntungan
-LONG_THRESHOLD = 5.0   # Sinyal jika naik > 5%
-SHORT_THRESHOLD = -5.0 # Sinyal jika turun > 5%
-VOL_MIN_USDT = 5000000 # Minimal Volume 5 Juta USDT
-COOLDOWN_SECONDS = 28800 # 8 Jam (8 * 3600)
+LEVERAGE = 20          
+LONG_THRESHOLD = 5.0   
+SHORT_THRESHOLD = -5.0 
+VOL_MIN_USDT = 5000000 
+COOLDOWN_SECONDS = 28800 
 
-# API Alternatif untuk Bypass Blokir Railway
-BINANCE_URLS = [
-    "https://api1.binance.com", 
-    "https://api2.binance.com", 
-    "https://api3.binance.com",
-    "https://data-api.binance.vision"
-]
+BINANCE_URLS = ["https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com", "https://data-api.binance.vision"]
 
-# Database RAM (Akan reset jika bot restart)
+# Database RAM
 active_positions = {} 
 sent_signals = {}
 daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
 last_report_date = datetime.now().date()
+last_update_id = 0
 
-def send_telegram(text):
-    if not TOKEN or not CHAT_ID: return
+def send_telegram(text, target_id=None, reply_markup=None):
+    if not TOKEN: return
+    dest = target_id if target_id else CHAT_ID
+    if not dest: return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": dest, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
+    if reply_markup: payload["reply_markup"] = reply_markup
     try:
-        requests.post(url, json={
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": False
-        }, timeout=10)
+        requests.post(url, json=payload, timeout=10)
     except: pass
+
+def get_main_menu():
+    return {
+        "keyboard": [
+            [{"text": "📊 Cek Status"}, {"text": "🔍 Analisa BTC"}],
+            [{"text": "📈 Analisa ETH"}, {"text": "🚀 Analisa SOL"}]
+        ],
+        "resize_keyboard": True, "one_time_keyboard": False
+    }
 
 def call_binance(endpoint):
     for base_url in BINANCE_URLS:
         try:
             url = f"{base_url}{endpoint}"
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                return response.json()
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200: return res.json()
         except: continue
     return None
 
@@ -56,147 +63,116 @@ def get_rsi(symbol):
     try:
         closes = [float(x[4]) for x in data]
         deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
-        up = [x if x > 0 else 0 for x in deltas]
-        down = [abs(x) if x < 0 else 0 for x in deltas]
-        avg_gain = sum(up[-14:]) / 14
-        avg_loss = sum(down[-14:]) / 14
+        up = [x if x > 0 else 0 for x in deltas]; down = [abs(x) if x < 0 else 0 for x in deltas]
+        avg_gain = sum(up[-14:]) / 14; avg_loss = sum(down[-14:]) / 14
         if avg_loss == 0: return 100
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
+        return 100 - (100 / (1 + (avg_gain / avg_loss)))
     except: return None
 
-def send_daily_report():
-    global daily_stats
-    total = daily_stats['tp'] + daily_stats['sl']
-    winrate = (daily_stats['tp'] / total * 100) if total > 0 else 0
-    
-    report = (
-        f"📊 *DAILY TRADING REPORT*\n"
-        f"📅 Date: {datetime.now().strftime('%Y-%m-%d')}\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"✅ Take Profit: `{daily_stats['tp']}`\n"
-        f"❌ Stop Loss: `{daily_stats['sl']}`\n"
-        f"📈 Win Rate: `{winrate:.1f}%`\n"
-        f"💰 Total ROE: `{daily_stats['total_roe']:+.2f}%` ({LEVERAGE}x)\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🔥 *Bot is ready for tomorrow!*"
-    )
-    send_telegram(report)
-    daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
+def handle_commands():
+    global last_update_id
+    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+    try:
+        response = requests.get(url, params={"offset": last_update_id + 1, "timeout": 5}, timeout=10).json()
+        if not response.get("result"): return
+        for update in response["result"]:
+            last_update_id = update["update_id"]
+            message = update.get("message", {})
+            text = message.get("text", "")
+            sender_id = str(message.get("from", {}).get("id"))
+            
+            if not text or not sender_id: continue
+
+            # --- CEK WHITELIST (Hanya User Premium) ---
+            if sender_id not in WHITELIST_IDS:
+                if text == "/start":
+                    send_telegram("❌ *AKSES DITOLAK*\n\nMaaf, ID Anda (`" + sender_id + "`) belum terdaftar sebagai member Premium. Hubungi Admin untuk aktivasi.", sender_id)
+                continue 
+
+            if text == "/start":
+                send_telegram("👋 *Selamat Datang Premium User!*\n\nKlik tombol di bawah untuk analisa instan atau ketik `/analisa NAMAKOIN`.", sender_id, get_main_menu())
+
+            elif text == "📊 Cek Status" or text == "/status":
+                msg = "📋 *Posisi Aktif:*\n" + "\n".join([f"• {s} ({p['side']})" for s, p in active_positions.items()]) if active_positions else "📭 *Tidak ada posisi aktif.*"
+                send_telegram(msg, sender_id, get_main_menu())
+
+            elif "Analisa" in text or text.startswith("/analisa"):
+                coin = text.replace("🔍 Analisa ", "").replace("📈 Analisa ", "").replace("🚀 Analisa ", "").replace("/analisa ", "").upper()
+                sym = coin + ("USDT" if not coin.endswith("USDT") else "")
+                ticker = call_binance(f"/api/v3/ticker/price?symbol={sym}")
+                if not ticker:
+                    send_telegram(f"❌ Koin {sym} tidak ditemukan.", sender_id)
+                    continue
+                p = float(ticker['price']); rsi = get_rsi(sym)
+                side = "LONG" if rsi < 50 else "SHORT"
+                tp = p * (1.03 if side == "LONG" else 0.97); sl = p * (0.985 if side == "LONG" else 1.015)
+                msg = (
+                    f"🔍 *HASIL ANALISA PREMIUM*\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"Asset: *{sym}*\n"
+                    f"Harga: `{p:.4f}` | RSI: `{rsi:.2f}`\n"
+                    f"Rekomendasi: *{side}* (20x)\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"🎯 TP: `{tp:.4f}`\n"
+                    f"🛑 SL: `{sl:.4f}`\n"
+                )
+                send_telegram(msg, sender_id, get_main_menu())
+    except: pass
 
 def track_prices(current_data):
     global active_positions, daily_stats, sent_signals
     to_remove = []
-    now = time.time()
-
     for symbol, pos in active_positions.items():
-        coin_data = next((c for c in current_data if c['symbol'] == symbol), None)
-        if not coin_data: continue
-        
-        current_price = float(coin_data['lastPrice'])
+        coin = next((c for c in current_data if c['symbol'] == symbol), None)
+        if not coin: continue
+        curr = float(coin['lastPrice'])
         status = None
-
         if pos['side'] == "LONG":
-            if current_price >= pos['tp']: status = "✅ TAKE PROFIT HIT"
-            elif current_price <= pos['sl']: status = "❌ STOP LOSS HIT"
+            if curr >= pos['tp']: status = "✅ TAKE PROFIT HIT"
+            elif curr <= pos['sl']: status = "❌ STOP LOSS HIT"
         else:
-            if current_price <= pos['tp']: status = "✅ TAKE PROFIT HIT"
-            elif current_price >= pos['sl']: status = "❌ STOP LOSS HIT"
-
+            if curr <= pos['tp']: status = "✅ TAKE PROFIT HIT"
+            elif curr >= pos['sl']: status = "❌ STOP LOSS HIT"
         if status:
-            raw_pnl = ((current_price - pos['entry']) / pos['entry'])
-            if pos['side'] == "SHORT": raw_pnl = -raw_pnl
+            raw_pnl = ((curr - pos['entry']) / pos['entry']) * (1 if pos['side'] == "LONG" else -1)
             roe = raw_pnl * LEVERAGE * 100
-            
-            if "TAKE PROFIT" in status: daily_stats['tp'] += 1
-            else: daily_stats['sl'] += 1
+            daily_stats['tp' if "PROFIT" in status else 'sl'] += 1
             daily_stats['total_roe'] += roe
-            
-            msg = (
-                f"{'💰' if 'PROFIT' in status else '💸'} *{status}*\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"Asset: *{symbol}*\n"
-                f"Side: `{pos['side']}` | Leverage: `{LEVERAGE}x`\n"
-                f"ROE: `{roe:+.2f}%` 🚀\n"
-                f"━━━━━━━━━━━━━━━"
-            )
-            send_telegram(msg)
-
-            # LOCK KOIN AGAR TIDAK MUNCUL LAGI (8 JAM)
-            sent_signals[symbol] = now 
-            sent_signals[f"{symbol}_{pos['side']}"] = now
-            
+            send_telegram(f"{status}\nAsset: *{symbol}* | ROE: `{roe:+.2f}%` 🚀")
+            sent_signals[symbol] = time.time()
             to_remove.append(symbol)
-
-    for sym in to_remove:
-        if sym in active_positions: del active_positions[sym]
+    for sym in to_remove: del active_positions[sym]
 
 def analyze():
-    global last_report_date, sent_signals
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Memindai market & monitoring...")
-    
-    current_date = datetime.now().date()
-    if current_date > last_report_date:
-        send_daily_report()
-        last_report_date = current_date
-
+    global last_report_date
+    if datetime.now().date() > last_report_date:
+        send_telegram(f"📊 *DAILY REPORT*\nROE: `{daily_stats['total_roe']:+.2f}%`")
+        daily_stats.update({"tp": 0, "sl": 0, "total_roe": 0.0})
+        last_report_date = datetime.now().date()
     data = call_binance("/api/v3/ticker/24hr")
-    if not data or not isinstance(data, list): return
-    
+    if not data: return
     track_prices(data)
-
     now = time.time()
     for coin in data:
-        symbol = coin.get('symbol', '')
+        symbol = coin['symbol']
         if not symbol.endswith("USDT") or symbol in active_positions: continue
-        
         try:
-            change = float(coin.get('priceChangePercent', 0))
-            volume = float(coin.get('quoteVolume', 0))
-            if volume < VOL_MIN_USDT: continue
-
+            change = float(coin['priceChangePercent']); vol = float(coin['quoteVolume'])
+            if vol < VOL_MIN_USDT: continue
             side = "LONG" if change >= LONG_THRESHOLD else "SHORT" if change <= SHORT_THRESHOLD else None
-
             if side:
-                sig_id = f"{symbol}_{side}"
-                
-                # CEK COOLDOWN: Cek koin secara umum ATAU sinyal spesifik
-                is_cooldown_sym = symbol in sent_signals and (now - sent_signals[symbol] < COOLDOWN_SECONDS)
-                is_cooldown_sig = sig_id in sent_signals and (now - sent_signals[sig_id] < COOLDOWN_SECONDS)
-                
-                if is_cooldown_sym or is_cooldown_sig:
-                    continue
-
+                if (symbol in sent_signals and now - sent_signals[symbol] < COOLDOWN_SECONDS): continue
                 rsi_val = get_rsi(symbol)
-                if rsi_val is None: continue
-                if (side == "LONG" and rsi_val > 65) or (side == "SHORT" and rsi_val < 35): continue
-                
+                if rsi_val is None or (side == "LONG" and rsi_val > 65) or (side == "SHORT" and rsi_val < 35): continue
                 price = float(coin['lastPrice'])
-                tp = price * (1.03 if side == "LONG" else 0.97)
-                sl = price * (0.985 if side == "LONG" else 1.015)
-                roi_target = 3.0 * LEVERAGE
-
-                active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
-                
-                msg = (
-                    f"{'🟢' if side == 'LONG' else '🔴'} *NEW SIGNAL: {side}*\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"💎 *Asset:* #{symbol} | `Cross {LEVERAGE}x`\n"
-                    f"💵 *Entry:* `{price:.4f}`\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"🎯 *Target (ROE {roi_target:.0f}%):* `{tp:.4f}`\n"
-                    f"🛑 *Stop Loss:* `{sl:.4f}`\n"
-                    f"📊 *RSI (1h):* `{rsi_val:.2f}`\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
-                )
-                send_telegram(msg)
-                sent_signals[sig_id] = now
-                print(f"✅ Sinyal Terkirim: {symbol}")
+                active_positions[symbol] = {"side": side, "entry": price, "tp": price * (1.03 if side == "LONG" else 0.97), "sl": price * (0.985 if side == "LONG" else 1.015)}
+                send_telegram(f"{'🟢' if side == 'LONG' else '🔴'} *NEW SIGNAL: {side}*\nAsset: #{symbol} | Entry: `{price:.4f}`")
         except: continue
 
 if __name__ == "__main__":
-    print("Bot AI Future Signal Aktif...")
+    print("Bot Premium Signal & Analisa Aktif...")
+    # Jalankan pendengar perintah di background
+    threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
     while True:
         analyze()
         time.sleep(60)
