@@ -7,7 +7,7 @@ from datetime import datetime
 # --- KONFIGURASI RAILWAY ---
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-# Format: ID1,ID2 (Contoh: 123456,789012)
+# Format di Railway: ID1,ID2 (Tanpa spasi, pisahkan dengan koma)
 WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 
 # Konfigurasi Trading
@@ -19,6 +19,7 @@ COOLDOWN_SECONDS = 28800
 
 BINANCE_URLS = ["https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com", "https://data-api.binance.vision"]
 
+# Database RAM
 active_positions = {} 
 sent_signals = {}
 daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
@@ -34,7 +35,7 @@ def send_telegram(text, target_id=None, reply_markup=None):
         "chat_id": dest, 
         "text": text, 
         "parse_mode": "Markdown",
-        "disable_web_page_preview": False # Diaktifkan agar muncul kotak TradingView di bawah
+        "disable_web_page_preview": False 
     }
     if reply_markup: payload["reply_markup"] = reply_markup
     try:
@@ -72,9 +73,7 @@ def get_rsi(symbol):
     except: return None
 
 def format_signal_message(side, symbol, price, tp, sl, rsi_val, mode="SIGNAL"):
-    # Format Header berdasarkan LONG/SHORT
     emoji_side = "🟢" if side == "LONG" else "🔴"
-    
     msg = (
         f"{emoji_side} *NEW {mode}: {side}*\n"
         f"__________________________________\n\n"
@@ -102,6 +101,7 @@ def handle_commands():
             
             if not text or not sender_id: continue
 
+            # Whitelist Check
             if sender_id not in WHITELIST_IDS:
                 if text == "/start":
                     send_telegram(f"❌ *AKSES DITOLAK*\n\nID: `{sender_id}`\nHubungi Admin untuk akses Premium.", sender_id)
@@ -124,7 +124,6 @@ def handle_commands():
                 p = float(ticker['price']); rsi = get_rsi(sym)
                 side = "LONG" if rsi < 50 else "SHORT"
                 tp = p * (1.03 if side == "LONG" else 0.97); sl = p * (0.985 if side == "LONG" else 1.015)
-                
                 msg = format_signal_message(side, sym, p, tp, sl, rsi, mode="ANALYZE")
                 send_telegram(msg, sender_id, get_main_menu())
     except: pass
@@ -148,17 +147,36 @@ def track_prices(current_data):
             roe = raw_pnl * LEVERAGE * 100
             daily_stats['tp' if "PROFIT" in status else 'sl'] += 1
             daily_stats['total_roe'] += roe
-            send_telegram(f"{'💰' if 'PROFIT' in status else '💸'} *{status}*\nAsset: *{symbol}* | ROE: `{roe:+.2f}%` 🚀")
+            
+            icon = "💰" if "PROFIT" in status else "💸"
+            msg = (
+                f"{icon} *{status}*\n\n"
+                f"Asset: *{symbol}*\n"
+                f"Side: *{pos['side']}* | Leverage: `{LEVERAGE}x`\n"
+                f"ROE: `{roe:+.2f}%` 🚀"
+            )
+            send_telegram(msg)
             sent_signals[symbol] = time.time()
             to_remove.append(symbol)
-    for sym in to_remove: del active_positions[sym]
+    for sym in to_remove:
+        if sym in active_positions: del active_positions[sym]
 
 def analyze():
     global last_report_date
     if datetime.now().date() > last_report_date:
-        send_telegram(f"📊 *DAILY REPORT*\nROE: `{daily_stats['total_roe']:+.2f}%`")
+        total = daily_stats['tp'] + daily_stats['sl']
+        winrate = (daily_stats['tp'] / total * 100) if total > 0 else 0
+        report = (
+            f"📊 *DAILY REPORT*\n"
+            f"__________________________________\n\n"
+            f"✅ TP: `{daily_stats['tp']}` | ❌ SL: `{daily_stats['sl']}`\n"
+            f"📈 Win Rate: `{winrate:.1f}%`\n"
+            f"💰 Total ROE: `{daily_stats['total_roe']:+.2f}%`"
+        )
+        send_telegram(report)
         daily_stats.update({"tp": 0, "sl": 0, "total_roe": 0.0})
         last_report_date = datetime.now().date()
+
     data = call_binance("/api/v3/ticker/24hr")
     if not data: return
     track_prices(data)
@@ -178,13 +196,11 @@ def analyze():
                 tp = price * (1.03 if side == "LONG" else 0.97)
                 sl = price * (0.985 if side == "LONG" else 1.015)
                 active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
-                
-                msg = format_signal_message(side, symbol, price, tp, sl, rsi_val)
-                send_telegram(msg)
+                send_telegram(format_signal_message(side, symbol, price, tp, sl, rsi_val))
         except: continue
 
 if __name__ == "__main__":
-    print("Bot Visual Premium Aktif...")
+    print("Bot Final Premium v4 Aktif...")
     threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
     while True:
         analyze()
