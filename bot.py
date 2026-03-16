@@ -7,7 +7,6 @@ from datetime import datetime
 # --- KONFIGURASI RAILWAY ---
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-# Format di Railway: ID1,ID2 (Tanpa spasi, pisahkan dengan koma)
 WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 
 # Konfigurasi Trading
@@ -26,20 +25,33 @@ daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
 last_report_date = datetime.now().date()
 last_update_id = 0
 
-def send_telegram(text, target_id=None, reply_markup=None):
+def send_telegram(text, target_id=None, image_url=None, reply_markup=None):
     if not TOKEN: return
     dest = target_id if target_id else CHAT_ID
     if not dest: return
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": dest, 
-        "text": text, 
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": False 
-    }
+
+    # Jika ada image_url, gunakan metode sendPhoto
+    if image_url:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+        payload = {
+            "chat_id": dest,
+            "photo": image_url,
+            "caption": text,
+            "parse_mode": "Markdown"
+        }
+    else:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        payload = {
+            "chat_id": dest, 
+            "text": text, 
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": False 
+        }
+    
     if reply_markup: payload["reply_markup"] = reply_markup
+    
     try:
-        requests.post(url, json=payload, timeout=10)
+        requests.post(url, json=payload, timeout=15)
     except: pass
 
 def get_main_menu():
@@ -79,11 +91,10 @@ def format_signal_message(side, symbol, price, tp, sl, rsi_val, mode="SIGNAL"):
         f"__________________________________\n\n"
         f"💎 *Asset:* #{symbol} | Cross `{LEVERAGE}x`\n"
         f"💵 *Entry:* `{price:.4f}`\n\n"
-        f"🎯 *Target (ROE 60%):* `{tp:.4f}`\n"
+        f"🎯 *Target:* `{tp:.4f}`\n"
         f"🛑 *Stop Loss:* `{sl:.4f}`\n"
         f"📊 *RSI (1h):* `{rsi_val:.2f}`\n"
-        f"__________________________________\n\n"
-        f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
+        f"__________________________________\n"
     )
     return msg
 
@@ -101,18 +112,17 @@ def handle_commands():
             
             if not text or not sender_id: continue
 
-            # Whitelist Check
             if sender_id not in WHITELIST_IDS:
                 if text == "/start":
-                    send_telegram(f"❌ *AKSES DITOLAK*\n\nID: `{sender_id}`\nHubungi Admin untuk akses Premium.", sender_id)
+                    send_telegram(f"❌ *AKSES DITOLAK*\n\nID: `{sender_id}`", sender_id)
                 continue 
 
             if text == "/start":
-                send_telegram("👋 *Akses Premium Aktif!*", sender_id, get_main_menu())
+                send_telegram("👋 *Akses Premium Aktif!*", sender_id, reply_markup=get_main_menu())
 
             elif text == "📊 Cek Status" or text == "/status":
                 msg = "📋 *Posisi Aktif:*\n" + "\n".join([f"• {s}" for s in active_positions.keys()]) if active_positions else "📭 *Kosong.*"
-                send_telegram(msg, sender_id, get_main_menu())
+                send_telegram(msg, sender_id, reply_markup=get_main_menu())
 
             elif "Analisa" in text or text.startswith("/analisa"):
                 coin = text.replace("🔍 Analisa ", "").replace("📈 Analisa ", "").replace("🚀 Analisa ", "").replace("/analisa ", "").upper()
@@ -124,8 +134,10 @@ def handle_commands():
                 p = float(ticker['price']); rsi = get_rsi(sym)
                 side = "LONG" if rsi < 50 else "SHORT"
                 tp = p * (1.03 if side == "LONG" else 0.97); sl = p * (0.985 if side == "LONG" else 1.015)
+                
+                chart_url = f"https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.png?symbol=BINANCE:{sym}&theme=dark"
                 msg = format_signal_message(side, sym, p, tp, sl, rsi, mode="ANALYZE")
-                send_telegram(msg, sender_id, get_main_menu())
+                send_telegram(msg, sender_id, image_url=chart_url, reply_markup=get_main_menu())
     except: pass
 
 def track_prices(current_data):
@@ -152,8 +164,7 @@ def track_prices(current_data):
             msg = (
                 f"{icon} *{status}*\n\n"
                 f"Asset: *{symbol}*\n"
-                f"Side: *{pos['side']}* | Leverage: `{LEVERAGE}x`\n"
-                f"ROE: `{roe:+.2f}%` 🚀"
+                f"Side: *{pos['side']}* | ROE: `{roe:+.2f}%` 🚀"
             )
             send_telegram(msg)
             sent_signals[symbol] = time.time()
@@ -170,8 +181,7 @@ def analyze():
             f"📊 *DAILY REPORT*\n"
             f"__________________________________\n\n"
             f"✅ TP: `{daily_stats['tp']}` | ❌ SL: `{daily_stats['sl']}`\n"
-            f"📈 Win Rate: `{winrate:.1f}%`\n"
-            f"💰 Total ROE: `{daily_stats['total_roe']:+.2f}%`"
+            f"📈 Win Rate: `{winrate:.1f}%` | ROE: `{daily_stats['total_roe']:+.2f}%`"
         )
         send_telegram(report)
         daily_stats.update({"tp": 0, "sl": 0, "total_roe": 0.0})
@@ -192,15 +202,18 @@ def analyze():
                 if (symbol in sent_signals and now - sent_signals[symbol] < COOLDOWN_SECONDS): continue
                 rsi_val = get_rsi(symbol)
                 if rsi_val is None or (side == "LONG" and rsi_val > 65) or (side == "SHORT" and rsi_val < 35): continue
+                
                 price = float(coin['lastPrice'])
                 tp = price * (1.03 if side == "LONG" else 0.97)
                 sl = price * (0.985 if side == "LONG" else 1.015)
                 active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
-                send_telegram(format_signal_message(side, symbol, price, tp, sl, rsi_val))
+                
+                chart_url = f"https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.png?symbol=BINANCE:{symbol}&theme=dark"
+                send_telegram(format_signal_message(side, symbol, price, tp, sl, rsi_val), image_url=chart_url)
         except: continue
 
 if __name__ == "__main__":
-    print("Bot Final Premium v4 Aktif...")
+    print("Bot Final Premium v4 (Image Mode) Aktif...")
     threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
     while True:
         analyze()
