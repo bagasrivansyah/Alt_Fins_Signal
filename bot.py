@@ -11,7 +11,7 @@ WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 
 # Konfigurasi Trading Pro
 LEVERAGE = 20          
-VOL_MIN_USDT = 5000000 
+VOL_MIN_USDT = 10000000 
 COOLDOWN_SECONDS = 14400 
 # Rasio TP 1, 2, dan 3 berdasarkan Risk
 TP1_RR = 1.0  # RR 1:1
@@ -137,7 +137,8 @@ def format_signal_message(side, symbol, price, tp1, tp2, tp3, sl, reason, mode="
         f"🛡️ *SMC Trailing Active*\n\n"
         f"{chart}\n\n"
         f"⚠️ *Trailing:* TP1 -> BE | TP2 -> Lock TP1\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📈 [View on TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
     )
     return msg
 
@@ -182,14 +183,12 @@ def track_prices(current_data):
         curr = float(coin['lastPrice'])
         
         # --- LOGIKA TRAILING STOP (MULTI TP) ---
-        # 1. Jika kena TP 1, SL pindah ke Entry (Break-Even)
         if pos['trail_level'] == 0:
             if (pos['side'] == "LONG" and curr >= pos['tp1']) or (pos['side'] == "SHORT" and curr <= pos['tp1']):
                 pos['sl'] = pos['entry']
                 pos['trail_level'] = 1
                 send_telegram(f"🛡️ *TP 1 HIT:* SL moved to Entry (BE) for #{symbol}")
 
-        # 2. Jika kena TP 2, SL pindah ke TP 1 (Lock Profit)
         elif pos['trail_level'] == 1:
             if (pos['side'] == "LONG" and curr >= pos['tp2']) or (pos['side'] == "SHORT" and curr <= pos['tp2']):
                 pos['sl'] = pos['tp1']
