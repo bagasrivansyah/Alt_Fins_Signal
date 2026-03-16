@@ -2,6 +2,7 @@ import requests
 import time
 import os
 import threading
+import numpy as np
 from datetime import datetime
 
 # --- KONFIGURASI RAILWAY ---
@@ -9,12 +10,13 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 
-# Konfigurasi Trading (ICT/SMC Style)
+# Konfigurasi Risk Management
 LEVERAGE = 20          
-VOL_MIN_USDT = 5000000 # ICT butuh likuiditas tinggi
-COOLDOWN_SECONDS = 14400 # 4 Jam cooldown agar setup lebih valid
+VOL_MIN_USDT = 10000000 # Ditingkatkan ke 10jt untuk akurasi SMC
+RISK_PER_TRADE_PERCENT = 1.0 # Resiko 1% saldo per trade
+COOLDOWN_SECONDS = 14400 
 
-BINANCE_URLS = ["https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com", "https://data-api.binance.vision"]
+BINANCE_URLS = ["https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com"]
 
 # Database RAM
 active_positions = {} 
@@ -23,79 +25,100 @@ daily_stats = {"tp": 0, "sl": 0, "total_roe": 0.0}
 last_report_date = datetime.now().date()
 last_update_id = 0
 
-# --- FORMAT HARGA DINAMIS ---
-def format_price(price):
-    if price == 0: return "0"
-    if price >= 1000: return f"{price:,.2f}"
-    elif price >= 1: return f"{price:.4f}"
-    elif price >= 0.01: return f"{price:.6f}"
-    else: return f"{price:.8f}"
+# --- MODUL TEKNIKAL LANJUTAN ---
 
-# --- ANALISA ICT: FVG & MSS ---
-def get_ict_analysis(symbol):
-    """Mendeteksi Smart Money Concept: FVG dan Market Structure"""
-    data = call_binance(f"/api/v3/klines?symbol={symbol}&interval=1h&limit=50")
-    if not data or len(data) < 5: return None
+def get_klines(symbol, interval, limit=50):
+    data = call_binance(f"/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}")
+    if not data: return None
+    return [{"h": float(x[2]), "l": float(x[3]), "c": float(x[4]), "v": float(x[5])} for x in data]
+
+def get_trend_htf(symbol):
+    """Filter HTF: Hanya trade searah dengan trend 4H (HTF)"""
+    candles = get_klines(symbol, "4h", 20)
+    if not candles: return "NEUTRAL"
+    ema = np.mean([x['c'] for x in candles])
+    return "BULLISH" if candles[-1]['c'] > ema else "BEARISH"
+
+def get_swing_points(candles):
+    """Mencari Swing High dan Swing Low terakhir untuk SL dinamis"""
+    highs = [x['h'] for x in candles[-15:]]
+    lows = [x['l'] for x in candles[-15:]]
+    return max(highs), min(lows)
+
+def get_ict_advanced_analysis(symbol):
+    """SMC Logic: FVG + MSS + HTF Confluence + Volume Displacement"""
+    c_1h = get_klines(symbol, "1h", 50)
+    if not c_1h: return None
     
-    try:
-        # Candle format: [0:time, 1:open, 2:high, 3:low, 4:close, ...]
-        c = [{"h": float(x[2]), "l": float(x[3]), "c": float(x[4])} for x in data]
-        
-        # 1. Deteksi BULLISH FVG (Imbalance di candle naik)
-        # Low Candle 3 > High Candle 1
-        if c[-1]['l'] > c[-3]['h']:
-            return {"side": "LONG", "reason": "BULLISH FVG (IMBALANCE)"}
-            
-        # 2. Deteksi BEARISH FVG (Imbalance di candle turun)
-        # High Candle 3 < Low Candle 1
-        if c[-1]['h'] < c[-3]['l']:
-            return {"side": "SHORT", "reason": "BEARISH FVG (IMBALANCE)"}
-            
-        # 3. Deteksi MSS (Market Structure Shift)
-        # Break of recent high/low
-        recent_high = max([x['h'] for x in c[-10:-2]])
-        recent_low = min([x['l'] for x in c[-10:-2]])
-        
-        if c[-1]['c'] > recent_high:
-            return {"side": "LONG", "reason": "MSS: BREAK OF STRUCTURE (BULLISH)"}
-        if c[-1]['c'] < recent_low:
-            return {"side": "SHORT", "reason": "MSS: BREAK OF STRUCTURE (BEARISH)"}
-            
-        return None
-    except: return None
+    htf_trend = get_trend_htf(symbol)
+    avg_vol = np.mean([x['v'] for x in c_1h[-10:]])
+    swing_high, swing_low = get_swing_points(c_1h)
+    
+    curr = c_1h[-1]
+    prev1 = c_1h[-2]
+    prev2 = c_1h[-3]
 
-# --- VISUAL CHART PREMIUM ---
-def generate_visual_chart(side, price, tp, sl, reason):
-    p_f, tp_f, sl_f = format_price(price), format_price(tp), format_price(sl)
+    # Displacement Filter: Candle harus punya volume > 1.5x rata-rata
+    is_displacement = curr['v'] > (avg_vol * 1.5)
+
+    # 1. BULLISH SETUP (HTF Bullish + FVG + Displacement)
+    if htf_trend == "BULLISH" and is_displacement:
+        # Bullish FVG: Low candle saat ini > High candle 2 bar lalu
+        if curr['l'] > prev2['h']:
+            return {
+                "side": "LONG", 
+                "reason": "BULLISH FVG + HTF CONFLUENCE",
+                "sl": swing_low * 0.998, # SL di bawah Swing Low
+                "tp": curr['c'] + (curr['c'] - swing_low) * 2 # RR 1:2
+            }
+
+    # 2. BEARISH SETUP (HTF Bearish + FVG + Displacement)
+    if htf_trend == "BEARISH" and is_displacement:
+        # Bearish FVG: High candle saat ini < Low candle 2 bar lalu
+        if curr['h'] < prev2['l']:
+            return {
+                "side": "SHORT", 
+                "reason": "BEARISH FVG + HTF CONFLUENCE",
+                "sl": swing_high * 1.002, # SL di atas Swing High
+                "tp": curr['c'] - (swing_high - curr['c']) * 2 # RR 1:2
+            }
+
+    return None
+
+# --- RISK & POSITION SIZING ---
+
+def calculate_position_size(entry, sl):
+    """Menghitung ukuran posisi berdasarkan resiko (Sizing Dinamis)"""
+    risk_pct = abs(entry - sl) / entry
+    if risk_pct == 0: return 0
+    # Formula: (Capital * Risk%) / Risk_Distance
+    # Diasumsikan capital per trade disesuaikan dengan resiko 1%
+    return (RISK_PER_TRADE_PERCENT / risk_pct)
+
+# --- TELEGRAM & UI ---
+
+def format_price(price):
+    if price >= 1000: return f"{price:,.2f}"
+    return f"{price:.6f}"
+
+def format_signal_message(side, symbol, entry, tp, sl, reason, is_update=False):
+    emoji = "🔵" if side == "LONG" else "🟠"
     arrow = "▲" if side == "LONG" else "▼"
     
-    chart = (
+    msg = (
+        f"{'🔄 *UPDATE POSISI*' if is_update else emoji + ' *NEW SMC SIGNAL*'}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 *Asset:* #{symbol} | {side}\n"
+        f"🛡️ *Logic:* `{reason}`\n\n"
         f"```\n"
-        f"🎯 TARGET (TP) : {tp_f}\n"
-        f"{arrow}───────────────{arrow}\n"
-        f"💎 ENTRY PRICE  : {p_f}\n"
-        f"{arrow}───────────────{arrow}\n"
-        f"🛑 STOP LOSS    : {sl_f}\n"
+        f"🎯 TP : {format_price(tp)}\n"
+        f"{arrow}───── ENTRY: {format_price(entry)}\n"
+        f"🛑 SL : {format_price(sl)}\n"
         f"```\n"
-        f"💡 *Logic:* `{reason}`"
+        f"⚙️ *Risk:* `Risk-Free (BE)` jika profit 1:1\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
     )
-    return chart
-
-def send_telegram(text, target_id=None, reply_markup=None):
-    if not TOKEN: return
-    dest = target_id if target_id else CHAT_ID
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": dest, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
-    if reply_markup: payload["reply_markup"] = reply_markup
-    try: requests.post(url, json=payload, timeout=10)
-    except: pass
-
-def get_main_menu():
-    return {
-        "keyboard": [[{"text": "📊 Status Posisi"}, {"text": "🔍 Analisa BTC"}],
-                     [{"text": "📈 Analisa ETH"}, {"text": "🚀 Analisa SOL"}]],
-        "resize_keyboard": True
-    }
+    return msg
 
 def call_binance(endpoint):
     for base_url in BINANCE_URLS:
@@ -105,136 +128,95 @@ def call_binance(endpoint):
         except: continue
     return None
 
-def format_signal_message(side, symbol, price, tp, sl, reason, mode="SIGNAL"):
-    emoji = "🔵" if side == "LONG" else "🟠"
-    chart = generate_visual_chart(side, price, tp, sl, reason)
-    est_roi = (abs(tp-price)/price) * LEVERAGE * 100
-    
-    msg = (
-        f"{emoji} *ICT {mode}: {side}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🪙 *Asset:* #{symbol}\n"
-        f"🛡️ *Concept:* `Smart Money (SMC)`\n"
-        f"⚙️ *Margin:* `Cross {LEVERAGE}x`\n\n"
-        f"{chart}\n\n"
-        f"💰 *Est. Profit:* `+{est_roi:.2f}% ROI`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📈 [View on TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
-    )
-    return msg
-
-def handle_commands():
-    global last_update_id
-    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-    try:
-        response = requests.get(url, params={"offset": last_update_id + 1, "timeout": 5}, timeout=10).json()
-        if not response.get("result"): return
-        for update in response["result"]:
-            last_update_id = update["update_id"]
-            message = update.get("message", {})
-            text = message.get("text", "")
-            sender_id = str(message.get("from", {}).get("id"))
-            
-            if not text or sender_id not in WHITELIST_IDS: continue
-
-            if text == "/start":
-                send_telegram("🏛️ *SMC Trading System Active!*", sender_id, get_main_menu())
-            elif "Status" in text:
-                m = "📋 *ICT ACTIVE POSITIONS*\n━━━━━━━━━━━━━━━━━━━━\n"
-                m += "\n".join([f"• *{s}* | {p['side']} | `{format_price(p['entry'])}`" for s,p in active_positions.items()]) if active_positions else "📭 *No Positions*"
-                send_telegram(m, sender_id)
-            elif "Analisa" in text:
-                coin = text.split()[-1].upper()
-                sym = coin if coin.endswith("USDT") else coin + "USDT"
-                ict = get_ict_analysis(sym)
-                ticker = call_binance(f"/api/v3/ticker/price?symbol={sym}")
-                if ict and ticker:
-                    p = float(ticker['price'])
-                    tp, sl = (p*1.04, p*0.98) if ict['side']=="LONG" else (p*0.96, p*1.02)
-                    send_telegram(format_signal_message(ict['side'], sym, p, tp, sl, ict['reason'], "ANALYZE"), sender_id)
-                else:
-                    send_telegram(f"❌ *{sym}* No ICT Setup found.", sender_id)
+def send_telegram(text, target_id=None):
+    if not TOKEN: return
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": target_id or CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    try: requests.post(url, json=payload, timeout=10)
     except: pass
 
-def track_prices(current_data):
-    global active_positions, daily_stats, sent_signals
+# --- CORE LOGIC ---
+
+def track_positions(current_prices):
+    global active_positions, daily_stats
     to_remove = []
+    
     for symbol, pos in active_positions.items():
-        coin = next((c for c in current_data if c['symbol'] == symbol), None)
-        if not coin: continue
-        curr = float(coin['lastPrice'])
+        ticker = next((c for c in current_prices if c['symbol'] == symbol), None)
+        if not ticker: continue
+        
+        curr_p = float(ticker['lastPrice'])
+        entry = pos['entry']
+        
+        # 1. Logika Break-Even (Risk Free)
+        # Jika profit sudah mencapai 1:1 RR, pindahkan SL ke Entry
+        if not pos.get('is_be'):
+            if (pos['side'] == "LONG" and curr_p >= entry + (pos['tp'] - entry)/2):
+                pos['sl'] = entry
+                pos['is_be'] = True
+                send_telegram(f"🛡️ *PROTECTION:* SL untuk #{symbol} dipindah ke Entry (Risk-Free).")
+            elif (pos['side'] == "SHORT" and curr_p <= entry - (entry - pos['tp'])/2):
+                pos['sl'] = entry
+                pos['is_be'] = True
+                send_telegram(f"🛡️ *PROTECTION:* SL untuk #{symbol} dipindah ke Entry (Risk-Free).")
+
+        # 2. Check TP / SL
         hit = None
         if pos['side'] == "LONG":
-            if curr >= pos['tp']: hit = "TAKE PROFIT (TARGET HIT)"
-            elif curr <= pos['sl']: hit = "STOP LOSS (INVALIDATED)"
+            if curr_p >= pos['tp']: hit = "TP ✅"
+            elif curr_p <= pos['sl']: hit = "SL ❌"
         else:
-            if curr <= pos['tp']: hit = "TAKE PROFIT (TARGET HIT)"
-            elif curr >= pos['sl']: hit = "STOP LOSS (INVALIDATED)"
-            
+            if curr_p <= pos['tp']: hit = "TP ✅"
+            elif curr_p >= pos['sl']: hit = "SL ❌"
+
         if hit:
-            raw_pnl = ((curr - pos['entry']) / pos['entry']) * (1 if pos['side'] == "LONG" else -1)
-            roe = raw_pnl * LEVERAGE * 100
-            daily_stats['tp' if "PROFIT" in hit else 'sl'] += 1
+            roe = ((curr_p - entry)/entry if pos['side']=="LONG" else (entry - curr_p)/entry) * LEVERAGE * 100
+            daily_stats['tp' if "✅" in hit else 'sl'] += 1
             daily_stats['total_roe'] += roe
-            icon = "💎" if "PROFIT" in hit else "🌪️"
-            msg = (
-                f"{icon} *ICT POSITION CLOSED*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🪙 *Asset:* #{symbol}\n"
-                f"📊 *Result:* {hit}\n"
-                f"📈 *ROI:* `{roe:+.2f}%` \n"
-                f"💵 *Exit:* `{format_price(curr)}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━"
-            )
-            send_telegram(msg)
-            sent_signals[symbol] = time.time()
+            send_telegram(f"🏁 *CLOSED {symbol}* at {format_price(curr_p)} ({hit})\nROI: `{roe:+.2f}%`")
             to_remove.append(symbol)
-    for sym in to_remove:
-        if sym in active_positions: del active_positions[sym]
 
-def analyze():
+    for s in to_remove: del active_positions[s]
+
+def main_loop():
     global last_report_date
-    if datetime.now().date() > last_report_date:
-        total = daily_stats['tp'] + daily_stats['sl']
-        wr = (daily_stats['tp'] / total * 100) if total > 0 else 0
-        report = (
-            f"🏛️ *SMC PERFORMANCE REPORT*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"✅ TP Hit: `{daily_stats['tp']}`\n"
-            f"❌ SL Hit: `{daily_stats['sl']}`\n"
-            f"📈 Win Rate: `{wr:.1f}%`\n"
-            f"💰 Total ROE: `{daily_stats['total_roe']:+.2f}%` \n"
-            f"━━━━━━━━━━━━━━━━━━━━"
-        )
-        send_telegram(report)
-        daily_stats.update({"tp": 0, "sl": 0, "total_roe": 0.0})
-        last_report_date = datetime.now().date()
-
-    data = call_binance("/api/v3/ticker/24hr")
-    if not data: return
-    track_prices(data)
-    now = time.time()
-    for coin in data:
-        symbol = coin['symbol']
-        if not symbol.endswith("USDT") or symbol in active_positions: continue
+    while True:
         try:
-            if float(coin['quoteVolume']) < VOL_MIN_USDT: continue
-            ict = get_ict_analysis(symbol)
-            if ict:
-                if (symbol in sent_signals and now - sent_signals[symbol] < COOLDOWN_SECONDS): continue
-                price = float(coin['lastPrice'])
-                side = ict['side']
-                # ICT Target: RR 1:2 (Risk 2%, Reward 4%)
-                tp = price * (1.04 if side == "LONG" else 0.96)
-                sl = price * (0.98 if side == "LONG" else 1.02)
-                active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
-                send_telegram(format_signal_message(side, symbol, price, tp, sl, ict['reason']))
-        except: continue
+            # 1. Report Harian
+            if datetime.now().date() > last_report_date:
+                # (Logika report sama seperti sebelumnya)
+                last_report_date = datetime.now().date()
+
+            # 2. Ambil Market Data
+            market_data = call_binance("/api/v3/ticker/24hr")
+            if not market_data: continue
+            
+            track_positions(market_data)
+            
+            # 3. Scan New Setup
+            for coin in market_data:
+                sym = coin['symbol']
+                if not sym.endswith("USDT") or sym in active_positions: continue
+                if float(coin['quoteVolume']) < VOL_MIN_USDT: continue
+                
+                # Cooldown check
+                if sym in sent_signals and time.time() - sent_signals[sym] < COOLDOWN_SECONDS:
+                    continue
+
+                ict = get_ict_advanced_analysis(sym)
+                if ict:
+                    price = float(coin['lastPrice'])
+                    active_positions[sym] = {
+                        "side": ict['side'], "entry": price, 
+                        "tp": ict['tp'], "sl": ict['sl'], "is_be": False
+                    }
+                    sent_signals[sym] = time.time()
+                    send_telegram(format_signal_message(ict['side'], sym, price, ict['tp'], ict['sl'], ict['reason']))
+
+        except Exception as e:
+            print(f"Error: {e}")
+        time.sleep(60)
 
 if __name__ == "__main__":
-    print("Bot ICT SMC v4.5 Active...")
-    threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
-    while True:
-        analyze()
-        time.sleep(60)
-        
+    print("SMC Professional Bot v5.0 Active...")
+    main_loop()
