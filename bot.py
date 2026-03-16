@@ -7,7 +7,7 @@ from datetime import datetime
 # --- KONFIGURASI RAILWAY ---
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-# Format: 123456,789012 (Tanpa spasi, pisahkan dengan koma)
+# Format: ID1,ID2 (Contoh: 123456,789012)
 WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",")
 
 # Konfigurasi Trading
@@ -33,8 +33,8 @@ def send_telegram(text, target_id=None, reply_markup=None):
     payload = {
         "chat_id": dest, 
         "text": text, 
-        "parse_mode": "Markdown", 
-        "disable_web_page_preview": True # Link tetap ada tapi preview gambar dimatikan agar rapi
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": False # Diaktifkan agar muncul kotak TradingView di bawah
     }
     if reply_markup: payload["reply_markup"] = reply_markup
     try:
@@ -71,6 +71,23 @@ def get_rsi(symbol):
         return 100 - (100 / (1 + (avg_gain / avg_loss)))
     except: return None
 
+def format_signal_message(side, symbol, price, tp, sl, rsi_val, mode="SIGNAL"):
+    # Format Header berdasarkan LONG/SHORT
+    emoji_side = "🟢" if side == "LONG" else "🔴"
+    
+    msg = (
+        f"{emoji_side} *NEW {mode}: {side}*\n"
+        f"__________________________________\n\n"
+        f"💎 *Asset:* #{symbol} | Cross `{LEVERAGE}x`\n"
+        f"💵 *Entry:* `{price:.4f}`\n\n"
+        f"🎯 *Target (ROE 60%):* `{tp:.4f}`\n"
+        f"🛑 *Stop Loss:* `{sl:.4f}`\n"
+        f"📊 *RSI (1h):* `{rsi_val:.2f}`\n"
+        f"__________________________________\n\n"
+        f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
+    )
+    return msg
+
 def handle_commands():
     global last_update_id
     url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
@@ -87,14 +104,14 @@ def handle_commands():
 
             if sender_id not in WHITELIST_IDS:
                 if text == "/start":
-                    send_telegram(f"❌ *AKSES DITOLAK*\n\nID Anda: `{sender_id}`\nHubungi Admin untuk akses Premium.", sender_id)
+                    send_telegram(f"❌ *AKSES DITOLAK*\n\nID: `{sender_id}`\nHubungi Admin untuk akses Premium.", sender_id)
                 continue 
 
             if text == "/start":
-                send_telegram("👋 *Halo User Premium!*\n\nGunakan tombol atau ketik `/analisa NAMAKOIN`.", sender_id, get_main_menu())
+                send_telegram("👋 *Akses Premium Aktif!*", sender_id, get_main_menu())
 
             elif text == "📊 Cek Status" or text == "/status":
-                msg = "📋 *Posisi Aktif:*\n" + "\n".join([f"• {s} ({p['side']})" for s, p in active_positions.items()]) if active_positions else "📭 *Tidak ada posisi aktif.*"
+                msg = "📋 *Posisi Aktif:*\n" + "\n".join([f"• {s}" for s in active_positions.keys()]) if active_positions else "📭 *Kosong.*"
                 send_telegram(msg, sender_id, get_main_menu())
 
             elif "Analisa" in text or text.startswith("/analisa"):
@@ -108,19 +125,7 @@ def handle_commands():
                 side = "LONG" if rsi < 50 else "SHORT"
                 tp = p * (1.03 if side == "LONG" else 0.97); sl = p * (0.985 if side == "LONG" else 1.015)
                 
-                # Format Analisa Manual (Sama dengan format Sinyal)
-                msg = (
-                    f"{'🟢' if side == 'LONG' else '🔴'} *NEW ANALYZE: {side}*\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"💎 *Asset:* #{sym} | `Cross {LEVERAGE}x`\n"
-                    f"💵 *Entry:* `{p:.4f}`\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"🎯 *Target (ROE 60%):* `{tp:.4f}`\n"
-                    f"🛑 *Stop Loss:* `{sl:.4f}`\n"
-                    f"📊 *RSI (1h):* `{rsi:.2f}`\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{sym}/)"
-                )
+                msg = format_signal_message(side, sym, p, tp, sl, rsi, mode="ANALYZE")
                 send_telegram(msg, sender_id, get_main_menu())
     except: pass
 
@@ -174,24 +179,12 @@ def analyze():
                 sl = price * (0.985 if side == "LONG" else 1.015)
                 active_positions[symbol] = {"side": side, "entry": price, "tp": tp, "sl": sl}
                 
-                # FORMAT TAMPILAN PERSIS PERMINTAAN ANDA
-                msg = (
-                    f"{'🟢' if side == 'LONG' else '🔴'} *NEW SIGNAL: {side}*\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"💎 *Asset:* #{symbol} | `Cross {LEVERAGE}x`\n"
-                    f"💵 *Entry:* `{price:.4f}`\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"🎯 *Target (ROE 60%):* `{tp:.4f}`\n"
-                    f"🛑 *Stop Loss:* `{sl:.4f}`\n"
-                    f"📊 *RSI (1h):* `{rsi_val:.2f}`\n"
-                    f"━━━━━━━━━━━━━━━\n"
-                    f"📈 [Chart TradingView](https://www.tradingview.com/symbols/BINANCE-{symbol}/)"
-                )
+                msg = format_signal_message(side, symbol, price, tp, sl, rsi_val)
                 send_telegram(msg)
         except: continue
 
 if __name__ == "__main__":
-    print("Bot Premium Signal & Analyze v3 Active...")
+    print("Bot Visual Premium Aktif...")
     threading.Thread(target=lambda: [handle_commands() or time.sleep(1) for _ in iter(int, 1)], daemon=True).start()
     while True:
         analyze()
